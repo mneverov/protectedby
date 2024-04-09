@@ -1,15 +1,15 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"go/ast"
 	"go/token"
-	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 	"log"
 	"strings"
 	"unicode"
+
+	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/passes/inspect"
 )
 
 const protectedBy = "protected by "
@@ -17,7 +17,7 @@ const protectedBy = "protected by "
 type protected struct {
 	field           *ast.Field
 	lock            *ast.Field
-	containerStruct *ast.StructType
+	containerStruct *ast.TypeSpec
 	file            *ast.File
 	fset            *token.FileSet
 }
@@ -25,7 +25,6 @@ type protected struct {
 var analyzer = &analysis.Analyzer{
 	Name:     "protectedby",
 	Doc:      "Checks concurrent access to shared resources.",
-	Flags:    flag.FlagSet{},
 	Run:      run,
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 }
@@ -34,8 +33,115 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	// todo(mneverov): use package instead of full path?
 	log.Printf("package %q", pass.Pkg.Name())
 	structs := getStructs(pass.Files, pass.Fset)
+	protectedToLocks, err := parseComments(pass.Files, pass.Fset, structs)
+	if err != nil {
+		return nil, err
+	}
 
-	return structs, nil
+	println(protectedToLocks)
+
+	return nil, nil
+}
+
+func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[string][]*ast.TypeSpec) (map[string][]protected, error) {
+	res := make(map[string][]protected)
+	for _, f := range files {
+		// full file name like /home/mneverov/go/src/github.com/mneverov/protectedby/testdata/src/protectedby/testfile.go
+		fileName := fset.Position(f.Pos()).Filename
+		commentMap := ast.NewCommentMap(fset, f, f.Comments)
+		var protectedInFile []protected
+
+		for node, commentMapGroups := range commentMap {
+			// Filter out nodes that are not fields. The linter only works for a struct fields protected
+			// by another field.
+			fieldDecl, ok := node.(*ast.Field)
+			if !ok {
+				continue
+			}
+
+			for _, commentGroup := range commentMapGroups {
+				for _, c := range commentGroup.List {
+					if !strings.Contains(c.Text, protectedBy) {
+						continue
+					}
+
+					spec, err := getStructSpec(fieldDecl, fileStructs[fileName])
+					if err != nil {
+						return nil, err
+					}
+
+					lockField, err := getLockField(c, spec)
+					if err != nil {
+						return nil, err
+					}
+
+					p := protected{
+						field:           fieldDecl,
+						lock:            lockField,
+						containerStruct: spec,
+						file:            f,
+						fset:            fset,
+					}
+
+					protectedInFile = append(protectedInFile, p)
+				}
+			}
+		}
+		if len(protectedInFile) > 0 {
+			res[fileName] = protectedInFile
+		}
+	}
+
+	return res, nil
+}
+
+func getLockField(comment *ast.Comment, ts *ast.TypeSpec) (*ast.Field, error) {
+	lockName, err := getLockName(comment.Text)
+	if err != nil {
+		return nil, err
+	}
+
+	st := ts.Type.(*ast.StructType)
+	if st.Fields == nil {
+		// Presence of the struct Name is checked in getStructSpec.
+		return nil, fmt.Errorf("failed to find lock %q in struct %s: fieldList is nil", lockName, ts.Name.Name)
+	}
+
+	var lockField *ast.Field
+	found := false
+	for _, field := range st.Fields.List {
+		for _, n := range field.Names {
+			if lockName == n.Name {
+				lockField = field
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		return nil, fmt.Errorf("struct %q does not have lock field %q", ts.Name.Name, lockName)
+	}
+
+	return lockField, nil
+}
+
+func getStructSpec(field ast.Node, structs []*ast.TypeSpec) (*ast.TypeSpec, error) {
+	found := false
+	var fieldStruct *ast.TypeSpec
+	for _, s := range structs {
+		if s.Pos() <= field.Pos() && s.End() >= field.End() {
+			fieldStruct = s
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return nil, fmt.Errorf("failed to find a struct for %s", field)
+	}
+
+	return fieldStruct, nil
 }
 
 func getStructs(files []*ast.File, fset *token.FileSet) map[string][]*ast.TypeSpec {
