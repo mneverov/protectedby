@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
+	"log"
 	"strings"
 	"unicode"
 )
@@ -27,6 +28,45 @@ var analyzer = &analysis.Analyzer{
 	Flags:    flag.FlagSet{},
 	Run:      run,
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
+}
+
+func run(pass *analysis.Pass) (interface{}, error) {
+	// todo(mneverov): use package instead of full path?
+	log.Printf("package %q", pass.Pkg.Name())
+	structs := getStructs(pass.Files, pass.Fset)
+
+	return structs, nil
+}
+
+func getStructs(files []*ast.File, fset *token.FileSet) map[string][]*ast.TypeSpec {
+	structs := make(map[string][]*ast.TypeSpec)
+	for _, f := range files {
+		fileName := fset.Position(f.Pos()).Filename
+		fileStructs := getFileStructs(f.Decls)
+		structs[fileName] = fileStructs
+	}
+
+	return structs
+}
+
+func getFileStructs(decls []ast.Decl) []*ast.TypeSpec {
+	var structs []*ast.TypeSpec
+	for _, decl := range decls {
+		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.TYPE {
+			for _, spec := range genDecl.Specs {
+				if typeSpec, ok := spec.(*ast.TypeSpec); ok {
+					if typeSpec.Name == nil {
+						continue
+					}
+					if _, ok := typeSpec.Type.(*ast.StructType); ok {
+						structs = append(structs, typeSpec)
+					}
+				}
+			}
+		}
+	}
+
+	return structs
 }
 
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not
@@ -52,8 +92,4 @@ func getLockName(comment string) (string, error) {
 
 func isLetterOrNumber(c rune) bool {
 	return !unicode.IsLetter(c) && !unicode.IsNumber(c)
-}
-
-func run(pass *analysis.Pass) (interface{}, error) {
-	return nil, nil
 }
