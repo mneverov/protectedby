@@ -19,29 +19,33 @@ func main() {
 // s1 is a struct with some fields.
 type s1 struct {
 	// field1
-	// multiline comment
+	// protected by mu.
 	field1 int
-	field2 int // field2 comment
+	field2 int // field2 protected by mu.
 	/*
-		field 3 comment
-		that is
-		also a multiline.
+		field3 is
+		protected by mu
+		and also has a multiline comment.
 	*/
 	field3 int
 
-	// field4 comment with empty line between the comment and field declaration.
+	// field4 has a comment with empty line between the comment and field declaration.
+	// protected by mu.
 
 	field4 int
 
-	// protected by mu
+	// protected by mu.
 	field5 int
-	// protected by: mu
+	// protected by: mu.
 	field6 int
-	// protected by "mu"
+	// protected by "mu".
 	field7 int
-	// todo(mneverov): test multiple "protected by" statements protected_by lock1 protected_by lock2
+	// field8 is protected by mu and protected by mu.// want "found 2 \"protected by \" in comment \"// field8 is protected by mu and protected by mu.\", expected exact one"
 	field8 int
-	mu     sync.Mutex
+
+	// field10 is protected by not existing mutex.// want `struct "s1" does not have lock field "not"`
+	field10 int
+	mu      sync.Mutex
 
 	// comment that does not belong to any field
 	// but still protected by mu.

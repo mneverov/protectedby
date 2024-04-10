@@ -12,7 +12,25 @@ import (
 	"golang.org/x/tools/go/analysis/passes/inspect"
 )
 
-const protectedBy = "protected by "
+const (
+	protectedBy   = "protected by "
+	testDirective = "// want `"
+)
+
+var testRun bool
+
+func init() {
+	analyzer.Flags.BoolVar(&testRun, "testrun", false, "if true, comments started with // want ` will be ignored")
+}
+
+type analysisError struct {
+	msg string
+	pos token.Pos
+}
+
+func (e analysisError) Error() string {
+	return e.msg
+}
 
 type protected struct {
 	field           *ast.Field
@@ -33,9 +51,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	// todo(mneverov): use package instead of full path?
 	log.Printf("package %q", pass.Pkg.Name())
 	structs := getStructs(pass.Files, pass.Fset)
-	protectedToLocks, err := parseComments(pass.Files, pass.Fset, structs)
-	if err != nil {
-		return nil, err
+	p, errors := parseComments(pass.Files, pass.Fset, structs, testRun)
+	if errors != nil {
+		for _, e := range errors {
+			pass.Reportf(e.pos, e.Error())
+		}
 	}
 
 	println(protectedToLocks)
@@ -43,8 +63,9 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	return nil, nil
 }
 
-func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[string][]*ast.TypeSpec) (map[string][]protected, error) {
+func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[string][]*ast.TypeSpec, testRun bool) (map[string][]protected, []analysisError) {
 	res := make(map[string][]protected)
+	var errors []analysisError
 	for _, f := range files {
 		// full file name like /home/mneverov/go/src/github.com/mneverov/protectedby/testdata/src/protectedby/testfile.go
 		fileName := fset.Position(f.Pos()).Filename
@@ -67,12 +88,14 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 
 					spec, err := getStructSpec(fieldDecl, fileStructs[fileName])
 					if err != nil {
-						return nil, err
+						errors = append(errors, *err)
+						continue
 					}
 
-					lockField, err := getLockField(c, spec)
+					lockField, err := getLockField(c, spec, testRun)
 					if err != nil {
-						return nil, err
+						errors = append(errors, *err)
+						continue
 					}
 
 					p := protected{
@@ -92,11 +115,11 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 		}
 	}
 
-	return res, nil
+	return res, errors
 }
 
-func getLockField(comment *ast.Comment, ts *ast.TypeSpec) (*ast.Field, error) {
-	lockName, err := getLockName(comment.Text)
+func getLockField(comment *ast.Comment, ts *ast.TypeSpec, testRun bool) (*ast.Field, *analysisError) {
+	lockName, err := getLockName(comment, testRun)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +127,10 @@ func getLockField(comment *ast.Comment, ts *ast.TypeSpec) (*ast.Field, error) {
 	st := ts.Type.(*ast.StructType)
 	if st.Fields == nil {
 		// Presence of the struct Name is checked in getStructSpec.
-		return nil, fmt.Errorf("failed to find lock %q in struct %s: fieldList is nil", lockName, ts.Name.Name)
+		return nil, &analysisError{
+			msg: fmt.Sprintf("failed to find lock %q in struct %s: fieldList is nil", lockName, ts.Name.Name),
+			pos: comment.Pos(),
+		}
 	}
 
 	var lockField *ast.Field
@@ -120,13 +146,16 @@ func getLockField(comment *ast.Comment, ts *ast.TypeSpec) (*ast.Field, error) {
 	}
 
 	if !found {
-		return nil, fmt.Errorf("struct %q does not have lock field %q", ts.Name.Name, lockName)
+		return nil, &analysisError{
+			msg: fmt.Sprintf("struct %q does not have lock field %q", ts.Name.Name, lockName),
+			pos: comment.Pos(),
+		}
 	}
 
 	return lockField, nil
 }
 
-func getStructSpec(field ast.Node, structs []*ast.TypeSpec) (*ast.TypeSpec, error) {
+func getStructSpec(field ast.Node, structs []*ast.TypeSpec) (*ast.TypeSpec, *analysisError) {
 	found := false
 	var fieldStruct *ast.TypeSpec
 	for _, s := range structs {
@@ -138,7 +167,10 @@ func getStructSpec(field ast.Node, structs []*ast.TypeSpec) (*ast.TypeSpec, erro
 	}
 
 	if !found {
-		return nil, fmt.Errorf("failed to find a struct for %s", field)
+		return nil, &analysisError{
+			msg: fmt.Sprintf("failed to find a struct for %s", field),
+			pos: field.Pos(),
+		}
 	}
 
 	return fieldStruct, nil
@@ -177,20 +209,37 @@ func getFileStructs(decls []ast.Decl) []*ast.TypeSpec {
 
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not
 // found or found more than once.
-func getLockName(comment string) (string, error) {
-	if cnt := strings.Count(comment, protectedBy); cnt != 1 {
-		return "", fmt.Errorf("found %d %q in %q, expected exact one", cnt, protectedBy, comment)
+func getLockName(comment *ast.Comment, testRun bool) (string, *analysisError) {
+	text := comment.Text
+	if testRun {
+		if idx := strings.Index(comment.Text, "// want \""); idx != -1 {
+			text = text[:idx]
+		}
 	}
 
-	idx := strings.Index(comment, protectedBy)
+	cnt := strings.Count(text, protectedBy)
+	if cnt != 1 {
+		return "", &analysisError{
+			msg: fmt.Sprintf("found %d %q in comment %q, expected exact one", cnt, protectedBy, text),
+			pos: comment.Pos(),
+		}
+	}
+
+	idx := strings.Index(text, protectedBy)
 	if idx == -1 {
-		return "", fmt.Errorf("comment %q does not contain %q statement", comment, protectedBy)
+		return "", &analysisError{
+			msg: fmt.Sprintf("comment %q does not contain %q statement", text, protectedBy),
+			pos: comment.Pos(),
+		}
 	}
 
-	c := comment[idx+len(protectedBy):]
+	c := text[idx+len(protectedBy):]
 	fields := strings.FieldsFunc(c, isLetterOrNumber)
 	if len(fields) == 0 {
-		return "", fmt.Errorf("failed to parse lock name from comment %q", comment)
+		return "", &analysisError{
+			msg: fmt.Sprintf("failed to parse lock name from comment %q", text),
+			pos: comment.Pos(),
+		}
 	}
 
 	return fields[0], nil
