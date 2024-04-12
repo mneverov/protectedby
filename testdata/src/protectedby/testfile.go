@@ -5,10 +5,10 @@ import (
 	"sync"
 )
 
-// This comment is associated with the hello constant.
+// This comment is associated with the hello constant. It cannot be protected by anything.
 const hello = "Hello, World!" // line comment 1
 
-// This comment is associated with the foo variable.
+// This comment is associated with the foo variable. It cannot be protected by anything.
 var foo = hello // line comment 2
 
 // main is a main function. It cannot be protected by anything.
@@ -16,49 +16,66 @@ func main() {
 	fmt.Println(hello) // line comment 3
 }
 
-// s1 is a struct with some fields.
+// s1 is a struct with some protected fields.
 type s1 struct {
-	// field1
+	// protectedField1 is
 	// protected by mu.
-	field1 int
-	field2 int // field2 protected by mu.
+	protectedField1 int
+	protectedField2 int // protectedField2 is protected by mu.
 	/*
-		field3 is
+		protectedField3 is
 		protected by mu
 		and also has a multiline comment.
 	*/
-	field3 int
+	protectedField3 int
 
-	// field4 has a comment with empty line between the comment and field declaration.
+	// protectedField4 has a comment with empty line between the comment and field declaration.
 	// protected by mu.
 
-	field4 int
+	protectedField4 int
 
-	// protected by mu.
-	field5 int
-	// protected by: mu.
+	// protectedField5 is protected by mu.
+	protectedField5 int
+	// field6 is protected by: mu. It is not checked by the linter because
+	// of semicolon. The pattern is "protected by <lock_name>" -- with a space between.
 	field6 int
-	// protected by "mu".
-	field7 int
+	// protectedField7 is protected by "mu". It is ok to put the lock name in parenthesis.
+	protectedField7 int
 	// field8 is protected by mu and protected by mu.// want "found 2 \"protected by \" in comment \"// field8 is protected by mu and protected by mu.\", expected exact one"
 	field8 int
 
 	// field10 is protected by not existing mutex.// want `struct "s1" does not have lock field "not"`
 	field10 int
-	mu      sync.Mutex
+
+	mu sync.Mutex
 
 	// comment that does not belong to any field
 	// but still protected by mu.
 }
 
 func (s *s1) func1() {
-	s.field5 = 42
+	s.protectedField1 = 42 // todo(mneverov): want this to fail
 }
 
 func (s *s1) func2() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.field5 = 42
+
+	s.protectedField2 = 42 // the access is protected, all is fine.
+}
+
+// s2 is another struct with a protected field.
+type s2 struct {
+	// s2protectedField protected by s2mu.
+	s2protectedField int
+	// s2mu protects s2protectedField.
+	s2mu sync.Mutex
+}
+
+// s3 is a struct with no protected fields.
+type s3 struct {
+	// field1
+	field1 int
 }
 
 // weird comment outside struct that does not belong to anything
