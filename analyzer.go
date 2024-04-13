@@ -50,8 +50,8 @@ var analyzer = &analysis.Analyzer{
 func run(pass *analysis.Pass) (interface{}, error) {
 	// todo(mneverov): use package instead of full path?
 	log.Printf("package %q", pass.Pkg.Name())
-	structs := getStructs(pass.Files, pass.Fset)
-	p, errors := parseComments(pass.Files, pass.Fset, structs, testRun)
+	structsPerFile := getStructs(pass.Files, pass.Fset)
+	fps, errors := parseComments(pass.Files, pass.Fset, structsPerFile, testRun)
 	if errors != nil {
 		for _, e := range errors {
 			pass.Reportf(e.pos, e.Error())
@@ -67,7 +67,6 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 	res := make(map[string][]protected)
 	var errors []analysisError
 	for _, f := range files {
-		// full file name like /home/mneverov/go/src/github.com/mneverov/protectedby/testdata/src/protectedby/testfile.go
 		fileName := fset.Position(f.Pos()).Filename
 		commentMap := ast.NewCommentMap(fset, f, f.Comments)
 		var protectedInFile []protected
@@ -75,7 +74,7 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 		for node, commentMapGroups := range commentMap {
 			// Filter out nodes that are not fields. The linter only works for a struct fields protected
 			// by another field.
-			fieldDecl, ok := node.(*ast.Field)
+			field, ok := node.(*ast.Field)
 			if !ok {
 				continue
 			}
@@ -86,21 +85,21 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 						continue
 					}
 
-					spec, err := getStructSpec(fieldDecl, fileStructs[fileName])
+					spec, err := getStructSpec(field, fileStructs[fileName])
 					if err != nil {
 						errors = append(errors, *err)
 						continue
 					}
 
-					lockField, err := getLockField(c, spec, testRun)
+					lock, err := getLockField(c, spec, testRun)
 					if err != nil {
 						errors = append(errors, *err)
 						continue
 					}
 
 					p := protected{
-						field:           fieldDecl,
-						lock:            lockField,
+						field:           field,
+						lock:            lock,
 						containerStruct: spec,
 						file:            f,
 						fset:            fset,
