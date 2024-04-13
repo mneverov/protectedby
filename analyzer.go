@@ -68,6 +68,9 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 	var errors []analysisError
 	for _, f := range files {
 		fileName := fset.Position(f.Pos()).Filename
+		// Each source file consists of a package clause defining the package to which it
+		// belongs (https://go.dev/ref/spec#Source_file_organization), hence safe to dereference.
+		pkg := f.Name.Name
 		commentMap := ast.NewCommentMap(fset, f, f.Comments)
 		var protectedInFile []protected
 
@@ -110,7 +113,7 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 			}
 		}
 		if len(protectedInFile) > 0 {
-			res[fileName] = protectedInFile
+			res[pkg] = append(res[pkg], protectedInFile...)
 		}
 	}
 
