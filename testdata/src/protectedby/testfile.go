@@ -38,14 +38,16 @@ type s1 struct {
 	protectedField5 int
 	// protectedField6 is protected by "mu". It is ok to put the lock name in parenthesis.
 	protectedField6 int
-	// field7 is protected by: mu. It is not checked by the linter because
-	// of semicolon. The pattern is "protected by <lock_name>" -- with a space between.
-	field7 int
-	// field8 is protected by mu and protected by mu.// want "found 2 \"protected by \" in comment \"// field8 is protected by mu and protected by mu.\", expected exact one"
-	field8 int
+	// protectedField7 is some shared resource. Protected by mu. Pattern is compared ignoring case.
+	protectedField7 int
+	// field1 is protected by: mu. It is not checked by the linter because
+	// of the semicolon. The pattern is "protected by <lock_name>" -- with a space between.
+	field1 int
+	// field2 is protected by mu and protected by mu.// want "found 2 \"protected by \" in comment \"// field8 is protected by mu and protected by mu.\", expected exact one"
+	field2 int
 
-	// field10 is protected by not existing mutex.// want `struct "s1" does not have lock field "not"`
-	field10 int
+	// field3 is protected by not existing mutex.// want `struct "s1" does not have lock field "not"`
+	field3 int
 
 	mu sync.Mutex
 

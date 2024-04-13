@@ -84,7 +84,7 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 
 			for _, commentGroup := range commentMapGroups {
 				for _, c := range commentGroup.List {
-					if !strings.Contains(c.Text, protectedBy) {
+					if !strings.Contains(strings.ToLower(c.Text), protectedBy) {
 						continue
 					}
 
@@ -219,7 +219,8 @@ func getLockName(comment *ast.Comment, testRun bool) (string, *analysisError) {
 		}
 	}
 
-	cnt := strings.Count(text, protectedBy)
+	lowerCaseComment := strings.ToLower(text)
+	cnt := strings.Count(lowerCaseComment, protectedBy)
 	if cnt != 1 {
 		return "", &analysisError{
 			msg: fmt.Sprintf("found %d %q in comment %q, expected exact one", cnt, protectedBy, text),
@@ -227,7 +228,7 @@ func getLockName(comment *ast.Comment, testRun bool) (string, *analysisError) {
 		}
 	}
 
-	idx := strings.Index(text, protectedBy)
+	idx := strings.Index(lowerCaseComment, protectedBy)
 	if idx == -1 {
 		return "", &analysisError{
 			msg: fmt.Sprintf("comment %q does not contain %q statement", text, protectedBy),
