@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"log"
 	"strings"
 	"unicode"
@@ -18,6 +19,16 @@ const (
 )
 
 var testRun bool
+
+var syncLocker = types.NewInterfaceType(
+	[]*types.Func{
+		types.NewFunc(token.NoPos, nil, "Lock",
+			types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(), false)),
+		types.NewFunc(token.NoPos, nil, "Unlock",
+			types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(), false)),
+	},
+	nil,
+).Complete()
 
 func init() {
 	analyzer.Flags.BoolVar(&testRun, "testrun", false, "if true, comments started with // want ` will be ignored")
@@ -51,7 +62,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	// todo(mneverov): use package instead of full path?
 	log.Printf("package %q", pass.Pkg.Name())
 	structsPerFile := getStructs(pass.Files, pass.Fset)
-	fps, errors := parseComments(pass.Files, pass.Fset, structsPerFile, testRun)
+	fps, errors := parseComments(pass, structsPerFile, testRun)
 	if errors != nil {
 		for _, e := range errors {
 			pass.Reportf(e.pos, e.Error())
@@ -63,15 +74,15 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	return nil, nil
 }
 
-func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[string][]*ast.TypeSpec, testRun bool) (map[string][]protected, []analysisError) {
+func parseComments(pass *analysis.Pass, fileStructs map[string][]*ast.TypeSpec, testRun bool) (map[string][]protected, []*analysisError) {
 	res := make(map[string][]protected)
-	var errors []analysisError
-	for _, f := range files {
-		fileName := fset.Position(f.Pos()).Filename
+	var errors []*analysisError
+	for _, f := range pass.Files {
+		fileName := pass.Fset.Position(f.Pos()).Filename
 		// Each source file consists of a package clause defining the package to which it
 		// belongs (https://go.dev/ref/spec#Source_file_organization), hence safe to dereference.
 		pkg := f.Name.Name
-		commentMap := ast.NewCommentMap(fset, f, f.Comments)
+		commentMap := ast.NewCommentMap(pass.Fset, f, f.Comments)
 		var protectedInFile []protected
 
 		for node, commentMapGroups := range commentMap {
@@ -90,14 +101,20 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 
 					spec, err := getStructSpec(field, fileStructs[fileName])
 					if err != nil {
-						errors = append(errors, *err)
+						errors = append(errors, err)
 						continue
 					}
 
 					lock, err := getLockField(c, spec, testRun)
 					if err != nil {
-						errors = append(errors, *err)
+						errors = append(errors, err)
 						continue
+					}
+					if !implementsLocker(pass, lock) {
+						errors = append(errors, &analysisError{
+							msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lock.Names[0].Name),
+							pos: lock.Pos(),
+						})
 					}
 
 					p := protected{
@@ -105,7 +122,7 @@ func parseComments(files []*ast.File, fset *token.FileSet, fileStructs map[strin
 						lock:            lock,
 						containerStruct: spec,
 						file:            f,
-						fset:            fset,
+						fset:            pass.Fset,
 					}
 
 					protectedInFile = append(protectedInFile, p)
@@ -155,6 +172,12 @@ func getLockField(comment *ast.Comment, ts *ast.TypeSpec, testRun bool) (*ast.Fi
 	}
 
 	return lockField, nil
+}
+
+func implementsLocker(pass *analysis.Pass, f *ast.Field) bool {
+	realType := pass.TypesInfo.TypeOf(f.Type)
+	ptrType := types.NewPointer(realType)
+	return types.Implements(realType, syncLocker) || types.Implements(ptrType, syncLocker)
 }
 
 func getStructSpec(field ast.Node, structs []*ast.TypeSpec) (*ast.TypeSpec, *analysisError) {

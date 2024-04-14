@@ -63,7 +63,7 @@ func Test_getLockName(t *testing.T) {
 			expectedError:    nil,
 		},
 		{
-			comment:          ast.Comment{Text: "// protected by testLockName// want \" protected by foo"},
+			comment:          ast.Comment{Text: "// protected by testLockName// want ` protected by foo"},
 			expectedLockName: lockName,
 			expectedError:    nil,
 		},

@@ -39,11 +39,10 @@ type s1 struct {
 	// protectedField6 is protected by "mu". It is ok to put the lock name in parenthesis.
 	protectedField6 int
 	// protectedField7 is some shared resource. Protected by mu. Pattern is compared ignoring case.
-	protectedField7 int
-	// field1 is protected by: mu. It is not checked by the linter because
-	// of the semicolon. The pattern is "protected by <lock_name>" -- with a space between.
+	protectedField7 *int
+	// field1 is protected by: mu. It is not checked by the linter because of the semicolon.
 	field1 int
-	// field2 is protected by mu and protected by mu.// want "found 2 \"protected by \" in comment \"// field8 is protected by mu and protected by mu.\", expected exact one"
+	// field2 is protected by mu and protected by mu.// want `found 2 "protected by " in comment "// field2 is protected by mu and protected by mu.", expected exact one`
 	field2 int
 
 	// field3 is protected by not existing mutex.// want `struct "s1" does not have lock field "not"`
@@ -66,6 +65,7 @@ func (s *s1) func2() {
 	defer s.mu.Unlock()
 
 	s.protectedField2 = 42 // the access is protected, all is fine.
+	_ = s.protectedField7
 }
 
 // func3 demonstrates not protected read access.
@@ -73,8 +73,8 @@ func (s *s1) func3() {
 	_ = s.protectedField3    // todo(mneverov): want ...
 	tmp := s.protectedField4 // todo(mneverov): want ...
 	fmt.Println(tmp)
-	fmt.Println(s.protectedField5)
-	if s.protectedField6 > 0 { // todo(mneverov): ...
+	fmt.Println(s.protectedField5) // todo(mneverov): ...
+	if s.protectedField6 > 0 {     // todo(mneverov): ...
 		if 42 > s.protectedField6 { // todo(mneverov): ...
 			// nothing interesting here
 		}
