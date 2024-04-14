@@ -30,10 +30,6 @@ var syncLocker = types.NewInterfaceType(
 	nil,
 ).Complete()
 
-func init() {
-	analyzer.Flags.BoolVar(&testRun, "testrun", false, "if true, comments started with // want ` will be ignored")
-}
-
 type analysisError struct {
 	msg string
 	pos token.Pos

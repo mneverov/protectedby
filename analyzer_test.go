@@ -9,7 +9,7 @@ import (
 )
 
 func TestAll(t *testing.T) {
-	_ = analyzer.Flags.Set("testrun", "true")
+	testRun = true
 	analysistest.Run(t, analysistest.TestData(), analyzer, "./...")
 }
 
