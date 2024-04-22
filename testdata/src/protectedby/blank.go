@@ -3,7 +3,8 @@ package protectedby
 import "sync"
 
 type blankIdent struct {
-	// _ is protected by mu.
+	// _ is protected by Mu. Make Mutex field public to make sure that it is not reported
+	// in case of embedded field.
 	_  int
-	mu sync.Mutex
+	Mu sync.Mutex
 }
