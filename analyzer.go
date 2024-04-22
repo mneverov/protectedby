@@ -101,6 +101,13 @@ func parseComments(pass *analysis.Pass, fileStructs map[string][]*ast.TypeSpec, 
 						continue
 					}
 
+					if token.IsExported(field.Names[0].Name) {
+						errors = append(errors, &analysisError{
+							msg: fmt.Sprintf("exported protected field %s.%s", spec.Name, field.Names[0].Name),
+							pos: field.Pos(),
+						})
+					}
+
 					lock, err := getLockField(c, spec, testRun)
 					if err != nil {
 						errors = append(errors, err)
@@ -109,6 +116,12 @@ func parseComments(pass *analysis.Pass, fileStructs map[string][]*ast.TypeSpec, 
 					if !implementsLocker(pass, lock) {
 						errors = append(errors, &analysisError{
 							msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lock.Names[0].Name),
+							pos: lock.Pos(),
+						})
+					}
+					if token.IsExported(lock.Names[0].Name) {
+						errors = append(errors, &analysisError{
+							msg: fmt.Sprintf("exported mutex %s.%s", spec.Name, lock.Names[0].Name),
 							pos: lock.Pos(),
 						})
 					}
