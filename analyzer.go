@@ -88,6 +88,10 @@ func parseComments(pass *analysis.Pass, fileStructs map[string][]*ast.TypeSpec, 
 			if !ok {
 				continue
 			}
+			// skip embedded fields and blank identifiers
+			if len(field.Names) != 1 || field.Names[0].Name == "_" {
+				continue
+			}
 
 			for _, commentGroup := range commentMapGroups {
 				for _, c := range commentGroup.List {
