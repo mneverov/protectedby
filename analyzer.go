@@ -43,9 +43,6 @@ type protected struct {
 	lock            *ast.Field
 	containerStruct *ast.TypeSpec
 	structType      types.Type
-	file            *ast.File
-	fset            *token.FileSet
-	usages          []*ast.Ident
 	usagePositions  []token.Position
 }
 
@@ -146,8 +143,6 @@ func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.T
 						lock:            lock,
 						containerStruct: spec,
 						structType:      pass.TypesInfo.TypeOf(spec.Type),
-						file:            f,
-						fset:            pass.Fset,
 					}
 
 					pName := protectedName(spec.Name.Name, fieldName)
