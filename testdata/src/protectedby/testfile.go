@@ -5,13 +5,15 @@ import (
 	"sync"
 )
 
-// This comment is associated with the hello constant. It cannot be protected by anything.
+// This comment is associated with the hello constant. It cannot be protected by anything even if it declares that it
+// is protected by something.
 const hello = "Hello, World!" // line comment 1
 
-// This comment is associated with the foo variable. It cannot be protected by anything.
+// This comment is associated with the foo variable. It cannot be protected by anything even if it declares that it is
+// protected by something.
 var foo = hello // line comment 2
 
-// main is a main function. It cannot be protected by anything.
+// main is a main function. It cannot be protected by anything even if it declares that it is protected by something.
 func main() {
 	fmt.Println(hello) // line comment 3
 }
