@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
-	"log"
 	"strings"
 	"unicode"
 
@@ -43,8 +42,11 @@ type protected struct {
 	field           *ast.Field
 	lock            *ast.Field
 	containerStruct *ast.TypeSpec
+	structType      types.Type
 	file            *ast.File
 	fset            *token.FileSet
+	usages          []*ast.Ident
+	usagePositions  []token.Position
 }
 
 var analyzer = &analysis.Analyzer{
@@ -55,31 +57,26 @@ var analyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (interface{}, error) {
-	// todo(mneverov): use package instead of full path?
-	log.Printf("package %q", pass.Pkg.Name())
-	structsPerFile := getStructs(pass.Files, pass.Fset)
-	fps, errors := parseComments(pass, structsPerFile, testRun)
+	structs := getStructs(pass.Files, pass.Fset)
+	protectedMap, errors := parseComments(pass, structs, testRun)
 	if errors != nil {
 		for _, e := range errors {
 			pass.Reportf(e.pos, e.Error())
 		}
+		return nil, nil
 	}
 
-	println(protectedToLocks)
+	addUsages(pass, protectedMap)
 
 	return nil, nil
 }
 
-func parseComments(pass *analysis.Pass, fileStructs map[string][]*ast.TypeSpec, testRun bool) (map[string][]protected, []*analysisError) {
-	res := make(map[string][]protected)
+func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.TypeSpec, testRun bool) (map[string]*protected, []*analysisError) {
+	res := make(map[string]*protected)
 	var errors []*analysisError
 	for _, f := range pass.Files {
 		fileName := pass.Fset.Position(f.Pos()).Filename
-		// Each source file consists of a package clause defining the package to which it
-		// belongs (https://go.dev/ref/spec#Source_file_organization), hence safe to dereference.
-		pkg := f.Name.Name
 		commentMap := ast.NewCommentMap(pass.Fset, f, f.Comments)
-		var protectedInFile []protected
 
 		for node, commentMapGroups := range commentMap {
 			// Filter out nodes that are not fields. The linter only works for a struct fields protected
@@ -93,7 +90,14 @@ func parseComments(pass *analysis.Pass, fileStructs map[string][]*ast.TypeSpec, 
 				continue
 			}
 
+			fieldName := field.Names[0].Name
 			for _, commentGroup := range commentMapGroups {
+				// todo(mneverov): when a comment is a multiline comment
+				//  and on each line "protected by " is mentioned, then it should be handled differently.
+				//  maybe add an error when another "protected by" is found, or when find the first "protected by"
+				//  then break (current behavior).
+
+				// In each case when get an error -- return early, i.e. break out from the loop.
 				for _, c := range commentGroup.List {
 					if !strings.Contains(strings.ToLower(c.Text), protectedBy) {
 						continue
@@ -102,48 +106,55 @@ func parseComments(pass *analysis.Pass, fileStructs map[string][]*ast.TypeSpec, 
 					spec, err := getStructSpec(field, fileStructs[fileName])
 					if err != nil {
 						errors = append(errors, err)
-						continue
+						break
 					}
 
-					if token.IsExported(field.Names[0].Name) {
+					// check here instead out of the loop because want to skip struct search for fields without
+					// "protected by".
+					if token.IsExported(fieldName) {
 						errors = append(errors, &analysisError{
-							msg: fmt.Sprintf("exported protected field %s.%s", spec.Name, field.Names[0].Name),
+							msg: fmt.Sprintf("exported protected field %s.%s", spec.Name, fieldName),
 							pos: field.Pos(),
 						})
+						break
 					}
 
 					lock, err := getLockField(c, spec, testRun)
 					if err != nil {
 						errors = append(errors, err)
-						continue
+						break
 					}
+
+					lockName := lock.Names[0].Name
 					if !implementsLocker(pass, lock) {
 						errors = append(errors, &analysisError{
-							msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lock.Names[0].Name),
+							msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lockName),
 							pos: lock.Pos(),
 						})
+						break
 					}
 					if token.IsExported(lock.Names[0].Name) {
 						errors = append(errors, &analysisError{
-							msg: fmt.Sprintf("exported mutex %s.%s", spec.Name, lock.Names[0].Name),
+							msg: fmt.Sprintf("exported mutex %s.%s", spec.Name, lockName),
 							pos: lock.Pos(),
 						})
+						break
 					}
 
-					p := protected{
+					p := &protected{
 						field:           field,
 						lock:            lock,
 						containerStruct: spec,
+						structType:      pass.TypesInfo.TypeOf(spec.Type),
 						file:            f,
 						fset:            pass.Fset,
 					}
 
-					protectedInFile = append(protectedInFile, p)
+					pName := protectedName(spec.Name.Name, fieldName)
+					res[pName] = p
+					break
 				}
 			}
-		}
-		if len(protectedInFile) > 0 {
-			res[pkg] = append(res[pkg], protectedInFile...)
 		}
 	}
 
@@ -193,7 +204,7 @@ func implementsLocker(pass *analysis.Pass, f *ast.Field) bool {
 	return types.Implements(realType, syncLocker) || types.Implements(ptrType, syncLocker)
 }
 
-func getStructSpec(field ast.Node, structs []*ast.TypeSpec) (*ast.TypeSpec, *analysisError) {
+func getStructSpec(field ast.Node, structs map[string]*ast.TypeSpec) (*ast.TypeSpec, *analysisError) {
 	found := false
 	var fieldStruct *ast.TypeSpec
 	for _, s := range structs {
@@ -214,8 +225,8 @@ func getStructSpec(field ast.Node, structs []*ast.TypeSpec) (*ast.TypeSpec, *ana
 	return fieldStruct, nil
 }
 
-func getStructs(files []*ast.File, fset *token.FileSet) map[string][]*ast.TypeSpec {
-	structs := make(map[string][]*ast.TypeSpec)
+func getStructs(files []*ast.File, fset *token.FileSet) map[string]map[string]*ast.TypeSpec {
+	structs := make(map[string]map[string]*ast.TypeSpec)
 	for _, f := range files {
 		fileName := fset.Position(f.Pos()).Filename
 		fileStructs := getFileStructs(f.Decls)
@@ -225,8 +236,8 @@ func getStructs(files []*ast.File, fset *token.FileSet) map[string][]*ast.TypeSp
 	return structs
 }
 
-func getFileStructs(decls []ast.Decl) []*ast.TypeSpec {
-	var structs []*ast.TypeSpec
+func getFileStructs(decls []ast.Decl) map[string]*ast.TypeSpec {
+	structs := make(map[string]*ast.TypeSpec)
 	for _, decl := range decls {
 		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.TYPE {
 			for _, spec := range genDecl.Specs {
@@ -235,7 +246,7 @@ func getFileStructs(decls []ast.Decl) []*ast.TypeSpec {
 						continue
 					}
 					if _, ok := typeSpec.Type.(*ast.StructType); ok {
-						structs = append(structs, typeSpec)
+						structs[typeSpec.Name.Name] = typeSpec
 					}
 				}
 			}
@@ -245,12 +256,48 @@ func getFileStructs(decls []ast.Decl) []*ast.TypeSpec {
 	return structs
 }
 
+func addUsages(pass *analysis.Pass, m map[string]*protected) {
+	// in each file find all selector expressions
+	for _, f := range pass.Files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch se := n.(type) {
+			case *ast.SelectorExpr:
+				if _, ok := se.X.(*ast.Ident); !ok {
+					return false
+				}
+
+				xtyp := deref(pass.TypesInfo.TypeOf(se.X))
+				// the type of the accessor must be named
+				named, ok := xtyp.(*types.Named)
+				if !ok {
+					return false
+				}
+				xTypedName := named.Obj()
+				// use named name to lookup a corresponding protected field.
+				// todo(mneverov): is it possible to have an alias here? Then need to deAlias.
+				pName := protectedName(xTypedName.Name(), se.Sel.Name)
+				p, ok := m[pName]
+				if !ok {
+					// todo(mneverov): log with debug level that pName was not found. It can be either
+					//  a regular field, or a missing "protected".
+					return false
+				}
+
+				p.usagePositions = append(p.usagePositions, pass.Fset.Position(se.X.Pos()))
+				return false
+			}
+
+			return true
+		})
+	}
+}
+
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not
 // found or found more than once.
 func getLockName(comment *ast.Comment, testRun bool) (string, *analysisError) {
 	text := comment.Text
 	if testRun {
-		if idx := strings.Index(comment.Text, "// want \""); idx != -1 {
+		if idx := strings.Index(comment.Text, testDirective); idx != -1 {
 			text = text[:idx]
 		}
 	}
@@ -286,4 +333,15 @@ func getLockName(comment *ast.Comment, testRun bool) (string, *analysisError) {
 
 func isLetterOrNumber(c rune) bool {
 	return !unicode.IsLetter(c) && !unicode.IsNumber(c)
+}
+
+func deref(T types.Type) types.Type {
+	if p, ok := T.Underlying().(*types.Pointer); ok {
+		return deref(p.Elem())
+	}
+	return T
+}
+
+func protectedName(structName, fieldName string) string {
+	return fmt.Sprintf("%s.%s", structName, fieldName)
 }
