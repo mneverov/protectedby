@@ -338,12 +338,18 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 // found or found more than once.
 func getLockName(comment *ast.Comment, testRun bool) (string, *analysisError) {
 	text := comment.Text
+	// analysistest uses comments of the form "// want ..." as an expected error message. A comment in a test file looks
+	// like "is protected by not existing mutex.// want `struct "s1" does not have lock field "not"`" i.e. contains
+	// multiple "protected by"'s. Since the analyser reacts on each "protected by" the code below excludes test
+	// directives from "// want `" till the end of the comment line.
 	if testRun {
 		if idx := strings.Index(comment.Text, testDirective); idx != -1 {
 			text = text[:idx]
 		}
 	}
 
+	// Compare "protected by " directive with lowercase comment because the directive can be a separate sentence i.e.
+	// starts with capital letter.
 	lowerCaseComment := strings.ToLower(text)
 	cnt := strings.Count(lowerCaseComment, protectedBy)
 	if cnt != 1 {
@@ -353,14 +359,8 @@ func getLockName(comment *ast.Comment, testRun bool) (string, *analysisError) {
 		}
 	}
 
+	// The index of "protected by " directive is guaranteed to be greater than -1 by checking count above.
 	idx := strings.Index(lowerCaseComment, protectedBy)
-	if idx == -1 {
-		return "", &analysisError{
-			msg: fmt.Sprintf("comment %q does not contain %q statement", text, protectedBy),
-			pos: comment.Pos(),
-		}
-	}
-
 	c := text[idx+len(protectedBy):]
 	fields := strings.FieldsFunc(c, isLetterOrNumber)
 	if len(fields) == 0 {
