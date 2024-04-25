@@ -273,8 +273,6 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) {
 				pName := protectedName(xTypedName.Name(), se.Sel.Name)
 				p, ok := m[pName]
 				if !ok {
-					// todo(mneverov): log with debug level that pName was not found. It can be either
-					//  a regular field, or a missing "protected".
 					return false
 				}
 
