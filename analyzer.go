@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
+	"golang.org/x/tools/go/ast/astutil"
 )
 
 const (
@@ -43,7 +44,13 @@ type protected struct {
 	lock            *ast.Field
 	containerStruct *ast.TypeSpec
 	structType      types.Type
-	usagePositions  []token.Position
+	usagePositions  []*usagePosition
+}
+
+type usagePosition struct {
+	expr         *ast.Expr
+	file         *ast.File
+	enclosingFun *ast.FuncDecl
 }
 
 var analyzer = &analysis.Analyzer{
@@ -63,8 +70,13 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		return nil, nil
 	}
 
-	addUsages(pass, protectedMap)
-
+	errors = addUsages(pass, protectedMap)
+	if errors != nil {
+		for _, e := range errors {
+			pass.Reportf(e.pos, e.Error())
+		}
+		return nil, nil
+	}
 	return nil, nil
 }
 
@@ -115,7 +127,7 @@ func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.T
 						})
 						break
 					}
-
+					// todo(mneverov): use pass.pkg.scope.parent.lookup instead
 					lock, err := getLockField(c, spec, testRun)
 					if err != nil {
 						errors = append(errors, err)
@@ -251,10 +263,12 @@ func getFileStructs(decls []ast.Decl) map[string]*ast.TypeSpec {
 	return structs
 }
 
-func addUsages(pass *analysis.Pass, m map[string]*protected) {
+// todo(mneverov): better naming func and map
+func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
+	var errors []*analysisError
 	// in each file find all selector expressions
-	for _, f := range pass.Files {
-		ast.Inspect(f, func(n ast.Node) bool {
+	for _, file := range pass.Files {
+		ast.Inspect(file, func(n ast.Node) bool {
 			switch se := n.(type) {
 			case *ast.SelectorExpr:
 				if _, ok := se.X.(*ast.Ident); !ok {
@@ -268,7 +282,7 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) {
 					return false
 				}
 				xTypedName := named.Obj()
-				// use named name to lookup a corresponding protected field.
+				// use typed name to lookup a corresponding protected field.
 				// todo(mneverov): is it possible to have an alias here? Then need to deAlias.
 				pName := protectedName(xTypedName.Name(), se.Sel.Name)
 				p, ok := m[pName]
@@ -276,13 +290,48 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) {
 					return false
 				}
 
-				p.usagePositions = append(p.usagePositions, pass.Fset.Position(se.X.Pos()))
+				fun, err := findEnclosingFunction(se.X.Pos(), se.X.End(), file)
+				if err != nil {
+					errors = append(errors, err)
+					return false
+				}
+
+				p.usagePositions = append(p.usagePositions, &usagePosition{
+					file:         file,
+					expr:         &se.X,
+					enclosingFun: fun,
+				})
 				return false
 			}
 
 			return true
 		})
 	}
+
+	return errors
+}
+
+func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl, *analysisError) {
+	path, _ := astutil.PathEnclosingInterval(file, start, end)
+
+	// Find the function declaration that encloses the positions.
+	var outer *ast.FuncDecl
+	for _, p := range path {
+		if p, ok := p.(*ast.FuncDecl); ok {
+			outer = p
+			break
+		}
+	}
+	if outer == nil {
+		// todo(mneverov): add test example when a struct field is a package variable.
+		return nil, &analysisError{
+			msg: "no enclosing function",
+			pos: start,
+		}
+
+	}
+
+	return outer, nil
 }
 
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not
