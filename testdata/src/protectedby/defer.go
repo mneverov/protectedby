@@ -15,17 +15,17 @@ func protectedAccessInDefer() {
 func notProtectedAccessInDefer() {
 	s := s1{}
 	defer func() {
-		s.protectedField1 = 42 // `want not protected access to shared field protectedField1, use s.mu.Lock()`
+		s.protectedField1 = 42 // want `not protected access to shared field protectedField1, use s.mu.Lock()`
 	}()
 }
 
 func lockInDeferAccessInFunc() {
 	s := s1{}
 	defer s.mu.Lock()
-	s.protectedField1 = 42 // todo(mneverov): want ...
+	s.protectedField2 = 42 // want `not protected access to shared field protectedField2, use s.mu.Lock()`
 }
 
-func accessInDeferLockInFunc() {
+func deferLockAfterAccessInDefer() {
 	s := s1{}
 	s.mu.Lock()
 
@@ -36,11 +36,11 @@ func accessInDeferLockInFunc() {
 	defer s.mu.Unlock() // not reported. It is your fault if you do things like that!
 }
 
-func differentDefers() {
+func deferLockBeforeDeferAccess() {
 	s := s1{}
 	defer s.mu.Lock()
 
 	defer func() {
-		s.protectedField1 = 42 // todo(mneverov): want ... here or in deferred Lock()?
+		s.protectedField1 = 42 // want `not protected access to shared field protectedField1, use s.mu.Lock()`
 	}()
 }

@@ -51,6 +51,7 @@ type usagePosition struct {
 	xID          *ast.Ident
 	file         *ast.File
 	enclosingFun *ast.FuncDecl
+	deferStmt    *ast.DeferStmt
 }
 
 var analyzer = &analysis.Analyzer{
@@ -306,7 +307,7 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
 					return false
 				}
 
-				fun, err := findEnclosingFunction(se.X.Pos(), se.X.End(), file)
+				fun, deferStmt, err := findEnclosingFunction(se.X.Pos(), se.X.End(), file)
 				if err != nil {
 					errors = append(errors, err)
 					return false
@@ -316,6 +317,7 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
 					file:         file,
 					xID:          id,
 					enclosingFun: fun,
+					deferStmt:    deferStmt,
 				})
 
 				return false
@@ -328,22 +330,18 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
 	return errors
 }
 
-func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl, *analysisError) {
+func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl, *ast.DeferStmt, *analysisError) {
 	path, _ := astutil.PathEnclosingInterval(file, start, end)
 
 	// Find the function declaration that encloses the positions.
 	var outer *ast.FuncDecl
+	var deferStmt *ast.DeferStmt
 	for _, p := range path {
-		/*
-			todo(mneverov): check defer. Currently, this does not recognize deferred functions, so for the following
-			func notProtectedAccessInDefer() { <--- current enclosing
-				s := s1{}
-				defer func() {                 <--- should be this instead
-					s.protectedField1 = 42 // todo(mneverov): want ...
-				}()
-			}
-			the enclosed function is "notProtectedAccessInDefer" but should be deferred function
-		*/
+		// Deferred access to a protected field is validated differently.
+		if d, ok := p.(*ast.DeferStmt); ok {
+			deferStmt = d
+		}
+
 		if p, ok := p.(*ast.FuncDecl); ok {
 			outer = p
 			break
@@ -351,14 +349,14 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 	}
 	if outer == nil {
 		// todo(mneverov): add test example when a struct field is a package variable.
-		return nil, &analysisError{
+		return nil, nil, &analysisError{
 			msg: "no enclosing function",
 			pos: start,
 		}
 
 	}
 
-	return outer, nil
+	return outer, deferStmt, nil
 }
 
 func checkLocksUsed(m map[string]*protected) []*analysisError {
@@ -368,6 +366,16 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 			found := false
 
 			ast.Inspect(u.enclosingFun, func(curr ast.Node) bool {
+				// Access to a protected field can be deferred. Skip node if this is a defer statement
+				// that is not the same where the field is accessed.
+				if deferStmt, ok := curr.(*ast.DeferStmt); ok {
+					if deferStmt == u.deferStmt {
+						return true
+					} else {
+						return false
+					}
+				}
+
 				cexpr, ok := curr.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -412,16 +420,17 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 				}
 
 				// todo(mneverov): Check that after it is called there is no unlock() call unless it is deferred.
-				// todo(mneverov): Check that the function is lockFunc (declared) called on a protected field lock.
 
 				return true
 			})
 
 			if !found {
-				sprintf := fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()", getFieldName(p.field), u.xID.Name, getFieldName(p.lock))
-				fmt.Println(sprintf)
 				errors = append(errors, &analysisError{
-					msg: sprintf,
+					msg: fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()",
+						getFieldName(p.field),
+						u.xID.Name,
+						getFieldName(p.lock),
+					),
 					pos: u.xID.Pos(),
 				})
 			}
