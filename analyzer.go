@@ -364,8 +364,12 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 	for _, p := range m {
 		for _, u := range p.usagePositions {
 			found := false
-
+			var lockExpr *ast.SelectorExpr
 			ast.Inspect(u.enclosingFun, func(curr ast.Node) bool {
+				if curr == nil {
+					return false
+				}
+
 				// Access to a protected field can be deferred. Skip node if this is a defer statement
 				// that is not the same where the field is accessed.
 				if deferStmt, ok := curr.(*ast.DeferStmt); ok {
@@ -416,15 +420,14 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 
 				if sxid.Obj == u.xID.Obj {
 					found = true
+					lockExpr = fnSelector
 					return false
 				}
-
-				// todo(mneverov): Check that after it is called there is no unlock() call unless it is deferred.
 
 				return true
 			})
 
-			if !found {
+			if !found || isUnlockCalled(u, lockExpr) {
 				errors = append(errors, &analysisError{
 					msg: fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()",
 						getFieldName(p.field),
@@ -438,6 +441,66 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 	}
 
 	return errors
+}
+
+func isUnlockCalled(u *usagePosition, lockExpr *ast.SelectorExpr) bool {
+	unlocked := false
+	ast.Inspect(u.enclosingFun, func(curr ast.Node) bool {
+		if curr == nil {
+			return false
+		}
+
+		cexpr, ok := curr.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		fnSelector, ok := cexpr.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+
+		// Return if the function is not "Unlock". At this point we already checked that the lock implements
+		// sync.Locker interface, namely Unlock() function, hence it cannot have another function with
+		// a name Lock and arguments -- overloading is forbidden in go.
+		if fnSelector.Sel.Name != "Unlock" {
+			return true
+		}
+
+		withinRange := curr.Pos() > lockExpr.Pos() && curr.Pos() < u.xID.Pos()
+		// Return if the Unlock() is called before Lock() or after access to a protected field.
+		if !withinRange {
+			return false
+		}
+
+		/*
+			function expression must be a SelectorExpr because the following is not valid:
+			s := s1{}      // a struct with a protected field and a mutex mu.
+			copyMu := s.mu // this copies mutex, i.e. copyMu.Lock() will not protect the field. This is reported
+				           // by go vet: "assignment copies lock value to mu: sync.Mutex".
+			copyMu.Lock()
+		*/
+		selExpr, ok := fnSelector.X.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+
+		sxid, ok := selExpr.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+
+		if sxid.Obj == u.xID.Obj && withinRange {
+			// If Unlock() is called from within deferred function
+			_, deferStmt, _ := findEnclosingFunction(curr.Pos(), curr.End(), u.file)
+			// it must be the same deferred statement as the deferred statement where current usage happened.
+			unlocked = deferStmt == u.deferStmt
+			return false
+		}
+
+		return true
+	})
+
+	return unlocked
 }
 
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not
