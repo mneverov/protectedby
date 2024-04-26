@@ -14,14 +14,14 @@ See code snippet:
 ```go
 
 type someStruct struct {
-// i is protected by mu. 
-i int
-mu sync.Mutex
+    // i is protected by mu. 
+    i int
+    mu sync.Mutex
 }
 
 func foo() {
-s := someStruct{}
-s.i = 42 // not protected access to shared field i, use s.mu.Lock()
+    s := someStruct{}
+    s.i = 42 // not protected access to shared field i, use s.mu.Lock()
 }
 ```
 
