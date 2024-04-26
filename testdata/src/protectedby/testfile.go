@@ -7,15 +7,15 @@ import (
 
 // This comment is associated with the hello constant. It cannot be protected by anything even if it declares that it
 // is protected by something.
-const hello = "Hello, World!" // line comment 1
+const hello = "Hello, World!"
 
 // This comment is associated with the foo variable. It cannot be protected by anything even if it declares that it is
 // protected by something.
-var foo = hello // line comment 2
+var foo = hello
 
 // main is a main function. It cannot be protected by anything even if it declares that it is protected by something.
 func main() {
-	fmt.Println(hello) // line comment 3
+	fmt.Println(hello)
 }
 
 // s1 is a struct with some protected fields.
@@ -42,7 +42,7 @@ type s1 struct {
 	protectedField6 int
 	// protectedField7 is some shared resource. Protected by mu. Pattern is compared ignoring case.
 	protectedField7 *int
-	// field1 is protected by: mu. It is not checked by the linter because of the semicolon.
+	// field1 is protected by: mu. It is NOT checked by the linter because of the semicolon.
 	field1 int
 	// field2 is protected by mu and protected by mu.// want `found 2 "protected by " in comment "// field2 is protected by mu and protected by mu.", expected exact one`
 	field2 int
@@ -53,12 +53,12 @@ type s1 struct {
 	mu sync.Mutex
 
 	// comment that does not belong to any field
-	// but still protected by mu.
+	// but still protected by mu. Not checked.
 }
 
 // func1 demonstrates not protected write access.
 func (s *s1) func1() {
-	s.protectedField1 = 42 // todo(mneverov): want this to fail
+	s.protectedField1 = 42 // want `not protected access to shared field protectedField1, use s.mu.Lock()`
 }
 
 // func2 demonstrates protected write access.
@@ -72,12 +72,12 @@ func (s *s1) func2() {
 
 // func3 demonstrates not protected read access.
 func (s *s1) func3() {
-	_ = s.protectedField3    // todo(mneverov): want ...
-	tmp := s.protectedField4 // todo(mneverov): want ...
+	_ = s.protectedField3    // want `not protected access to shared field protectedField3, use s.mu.Lock()`
+	tmp := s.protectedField4 // want `not protected access to shared field protectedField4, use s.mu.Lock()`
 	fmt.Println(tmp)
-	fmt.Println(s.protectedField5) // todo(mneverov): ...
-	if s.protectedField6 > 0 {     // todo(mneverov): ...
-		if 42 > s.protectedField6 { // todo(mneverov): ...
+	fmt.Println(s.protectedField5) // want `not protected access to shared field protectedField5, use s.mu.Lock()`
+	if s.protectedField6 > 0 {     // want `not protected access to shared field protectedField6, use s.mu.Lock()`
+		if 42 > s.protectedField6 { // want `not protected access to shared field protectedField6, use s.mu.Lock()`
 			// nothing interesting here
 		}
 	}
@@ -91,10 +91,8 @@ type s2 struct {
 	s2mu sync.Mutex
 }
 
-// s3 is a struct with no protected fields.
-type s3 struct {
-	// field1
-	field1 int
+func (s *s2) wantError() {
+	s.s2protectedField = 42 // want `not protected access to shared field s2protectedField, use s.s2mu.Lock()`
 }
 
 // weird comment outside struct that does not belong to anything

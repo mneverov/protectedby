@@ -81,6 +81,17 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			return nil, nil
 		}
 	}
+
+	errors = checkLocksUsed(protectedMap)
+	if errors != nil {
+		for _, e := range errors {
+			pass.Reportf(e.pos, e.Error())
+		}
+		if !testRun {
+			return nil, nil
+		}
+	}
+
 	return nil, nil
 }
 
@@ -348,6 +359,76 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 	}
 
 	return outer, nil
+}
+
+func checkLocksUsed(m map[string]*protected) []*analysisError {
+	var errors []*analysisError
+	for _, p := range m {
+		for _, u := range p.usagePositions {
+			found := false
+
+			ast.Inspect(u.enclosingFun, func(curr ast.Node) bool {
+				cexpr, ok := curr.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				fnSelector, ok := cexpr.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+
+				// Return if the function is not "Lock". At this point we already checked that the lock implements
+				// sync.Locker interface, namely Lock() function, hence it cannot have another function with
+				// a name Lock and arguments -- overloading is forbidden in go.
+				if fnSelector.Sel.Name != "Lock" {
+					return true
+				}
+
+				// Return if the function call is outside the function or after the protected field access.
+				if curr.Pos() <= u.enclosingFun.Body.Pos() || curr.Pos() >= u.xID.Pos() {
+					return false
+				}
+
+				/*
+					function expression must be a SelectorExpr because the following is not valid:
+					s := s1{}      // a struct with a protected field and a mutex mu.
+					copyMu := s.mu // this copies mutex, i.e. copyMu.Lock() will not protect the field. This is reported
+						           // by go vet: "assignment copies lock value to mu: sync.Mutex".
+					copyMu.Lock()
+				*/
+				selExpr, ok := fnSelector.X.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+
+				sxid, ok := selExpr.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+
+				if sxid.Obj == u.xID.Obj {
+					found = true
+					return false
+				}
+
+				// todo(mneverov): Check that after it is called there is no unlock() call unless it is deferred.
+				// todo(mneverov): Check that the function is lockFunc (declared) called on a protected field lock.
+
+				return true
+			})
+
+			if !found {
+				sprintf := fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()", getFieldName(p.field), u.xID.Name, getFieldName(p.lock))
+				fmt.Println(sprintf)
+				errors = append(errors, &analysisError{
+					msg: sprintf,
+					pos: u.xID.Pos(),
+				})
+			}
+		}
+	}
+
+	return errors
 }
 
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not
