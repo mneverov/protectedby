@@ -48,7 +48,7 @@ type protected struct {
 }
 
 type usagePosition struct {
-	expr         *ast.Expr
+	xID          *ast.Ident
 	file         *ast.File
 	enclosingFun *ast.FuncDecl
 }
@@ -275,7 +275,8 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch se := n.(type) {
 			case *ast.SelectorExpr:
-				if _, ok := se.X.(*ast.Ident); !ok {
+				id, ok := se.X.(*ast.Ident)
+				if !ok {
 					return false
 				}
 
@@ -302,9 +303,10 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
 
 				p.usagePositions = append(p.usagePositions, &usagePosition{
 					file:         file,
-					expr:         &se.X,
+					xID:          id,
 					enclosingFun: fun,
 				})
+
 				return false
 			}
 
