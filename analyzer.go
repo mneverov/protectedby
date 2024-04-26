@@ -317,6 +317,16 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 	// Find the function declaration that encloses the positions.
 	var outer *ast.FuncDecl
 	for _, p := range path {
+		/*
+			todo(mneverov): check defer. Currently, this does not recognize deferred functions, so for the following
+			func notProtectedAccessInDefer() { <--- current enclosing
+				s := s1{}
+				defer func() {                 <--- should be this instead
+					s.protectedField1 = 42 // todo(mneverov): want ...
+				}()
+			}
+			the enclosed function is "notProtectedAccessInDefer" but should be deferred function
+		*/
 		if p, ok := p.(*ast.FuncDecl); ok {
 			outer = p
 			break
