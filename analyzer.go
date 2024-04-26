@@ -99,11 +99,11 @@ func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.T
 				continue
 			}
 			// skip embedded fields and blank identifiers
-			if len(field.Names) != 1 || field.Names[0].Name == "_" {
+			fieldName := getFieldName(field)
+			if fieldName == "" || fieldName == "_" {
 				continue
 			}
 
-			fieldName := field.Names[0].Name
 			for _, commentGroup := range commentMapGroups {
 				// todo(mneverov): when a comment is a multiline comment
 				//  and on each line "protected by " is mentioned, then it should be handled differently.
@@ -138,7 +138,7 @@ func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.T
 						break
 					}
 
-					lockName := lock.Names[0].Name
+					lockName := getFieldName(lock)
 					if !implementsLocker(pass, lock) {
 						errors = append(errors, &analysisError{
 							msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lockName),
@@ -146,7 +146,7 @@ func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.T
 						})
 						break
 					}
-					if token.IsExported(lock.Names[0].Name) {
+					if token.IsExported(lockName) {
 						errors = append(errors, &analysisError{
 							msg: fmt.Sprintf("exported mutex %s.%s", spec.Name, lockName),
 							pos: lock.Pos(),
@@ -402,4 +402,11 @@ func deref(T types.Type) types.Type {
 
 func protectedName(structName, fieldName string) string {
 	return fmt.Sprintf("%s.%s", structName, fieldName)
+}
+
+func getFieldName(f *ast.Field) string {
+	if len(f.Names) != 1 {
+		return ""
+	}
+	return f.Names[0].Name
 }
