@@ -23,7 +23,7 @@ func (ml myLocker) Lock()   {}
 func (ml myLocker) Unlock() {}
 
 type s7 struct {
-	// s7f is protected by mu
+	// s7f is protected by mu.
 	s7f int
 	mu  myLocker
 }

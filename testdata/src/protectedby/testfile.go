@@ -56,22 +56,10 @@ type s1 struct {
 	// but still protected by mu. Not checked.
 }
 
-// func1 demonstrates not protected write access.
+// func1 demonstrates not protected access.
 func (s *s1) func1() {
 	s.protectedField1 = 42 // want `not protected access to shared field protectedField1, use s.mu.Lock()`
-}
 
-// func2 demonstrates protected write access.
-func (s *s1) func2() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.protectedField2 = 42 // the access is protected, all is fine.
-	_ = s.protectedField7
-}
-
-// func3 demonstrates not protected read access.
-func (s *s1) func3() {
 	_ = s.protectedField3    // want `not protected access to shared field protectedField3, use s.mu.Lock()`
 	tmp := s.protectedField4 // want `not protected access to shared field protectedField4, use s.mu.Lock()`
 	fmt.Println(tmp)
@@ -81,6 +69,15 @@ func (s *s1) func3() {
 			// nothing interesting here
 		}
 	}
+}
+
+// func2 demonstrates protected access.
+func (s *s1) func2() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.protectedField2 = 42 // the access is protected, all is fine.
+	_ = s.protectedField7
 }
 
 // s2 is another struct with a protected field.
