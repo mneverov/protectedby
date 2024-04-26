@@ -67,7 +67,9 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		for _, e := range errors {
 			pass.Reportf(e.pos, e.Error())
 		}
-		return nil, nil
+		if !testRun {
+			return nil, nil
+		}
 	}
 
 	errors = addUsages(pass, protectedMap)
@@ -75,7 +77,9 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		for _, e := range errors {
 			pass.Reportf(e.pos, e.Error())
 		}
-		return nil, nil
+		if !testRun {
+			return nil, nil
+		}
 	}
 	return nil, nil
 }
