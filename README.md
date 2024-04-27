@@ -1,13 +1,13 @@
 # protectedby
 
-Linter that checks concurrent access to shared resources.
+Checks that access to shared resources is protected.
 
 ```sh
 go install github.com/mneverov/protectedby@latest
 ```
 
-When a shared resource (field) is accompanied by the comment `protected by <lock_name>`, access to this field will be
-validated to ensure it is guarded by the specified mutex.
+When a shared resource (field) has a comment with `protected by <lock_name>`, access to this field will be
+validated to ensure it is guarded by the specified lock.
 
 See code snippet:
 

@@ -39,23 +39,23 @@ func (e analysisError) Error() string {
 	return e.msg
 }
 
-type protected struct {
+type protectedData struct {
 	field           *ast.Field
 	lock            *ast.Field
-	containerStruct *ast.TypeSpec
-	usagePositions  []*usagePosition
+	enclosingStruct *ast.TypeSpec
+	usages          []*usage
 }
 
-type usagePosition struct {
-	xID          *ast.Ident
-	file         *ast.File
-	enclosingFun *ast.FuncDecl
-	deferStmt    *ast.DeferStmt
+type usage struct {
+	file          *ast.File
+	selectorXID   *ast.Ident
+	enclosingFunc *ast.FuncDecl
+	deferStmt     *ast.DeferStmt
 }
 
 var analyzer = &analysis.Analyzer{
 	Name:     "protectedby",
-	Doc:      "Checks concurrent access to shared resources.",
+	Doc:      "Checks that access to shared resources is protected.",
 	Run:      run,
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 }
@@ -94,8 +94,8 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	return nil, nil
 }
 
-func parseComments(pass *analysis.Pass) (map[string]*protected, []*analysisError) {
-	res := make(map[string]*protected)
+func parseComments(pass *analysis.Pass) (map[string]*protectedData, []*analysisError) {
+	res := make(map[string]*protectedData)
 	var errors []*analysisError
 
 	for _, f := range pass.Files {
@@ -108,7 +108,7 @@ func parseComments(pass *analysis.Pass) (map[string]*protected, []*analysisError
 			if !ok {
 				continue
 			}
-			// Skip embedded fields and blank identifiers
+			// Skip embedded fields and blank identifiers.
 			fieldName := getFieldName(field)
 			if fieldName == "" || fieldName == "_" {
 				continue
@@ -140,10 +140,10 @@ func parseComments(pass *analysis.Pass) (map[string]*protected, []*analysisError
 						continue commentGroup
 					}
 
-					p := &protected{
+					p := &protectedData{
 						field:           field,
 						lock:            lock,
-						containerStruct: spec,
+						enclosingStruct: spec,
 					}
 
 					pName := protectedName(spec.Name.Name, fieldName)
@@ -163,10 +163,9 @@ func implementsLocker(pass *analysis.Pass, f *ast.Field) bool {
 	return types.Implements(realType, syncLocker) || types.Implements(ptrType, syncLocker)
 }
 
-// todo(mneverov): better naming func and map
-func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
+func addUsages(pass *analysis.Pass, protectedMap map[string]*protectedData) []*analysisError {
 	var errors []*analysisError
-	// in each file find all selector expressions
+
 	for _, file := range pass.Files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch se := n.(type) {
@@ -177,31 +176,30 @@ func addUsages(pass *analysis.Pass, m map[string]*protected) []*analysisError {
 				}
 
 				xtyp := deref(pass.TypesInfo.TypeOf(se.X))
-				// the type of the accessor must be named
+				// The type of the accessor must be named.
 				named, ok := xtyp.(*types.Named)
 				if !ok {
 					return false
 				}
-				xTypedName := named.Obj()
-				// use typed name to lookup a corresponding protected field.
-				// todo(mneverov): is it possible to have an alias here? Then need to deAlias.
-				pName := protectedName(xTypedName.Name(), se.Sel.Name)
-				p, ok := m[pName]
+
+				// Use typed name to lookup a corresponding protected field.
+				pName := protectedName(named.Obj().Name(), se.Sel.Name)
+				p, ok := protectedMap[pName]
 				if !ok {
 					return false
 				}
 
-				fun, deferStmt, err := findEnclosingFunction(se.X.Pos(), se.X.End(), file)
+				fn, deferStmt, err := findEnclosingFunction(se.X.Pos(), se.X.End(), file)
 				if err != nil {
 					errors = append(errors, err)
 					return false
 				}
 
-				p.usagePositions = append(p.usagePositions, &usagePosition{
-					file:         file,
-					xID:          id,
-					enclosingFun: fun,
-					deferStmt:    deferStmt,
+				p.usages = append(p.usages, &usage{
+					file:          file,
+					selectorXID:   id,
+					enclosingFunc: fn,
+					deferStmt:     deferStmt,
 				})
 
 				return false
@@ -231,25 +229,24 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 			break
 		}
 	}
+
 	if outer == nil {
-		// todo(mneverov): add test example when a struct field is a package variable.
 		return nil, nil, &analysisError{
 			msg: "no enclosing function",
 			pos: start,
 		}
-
 	}
 
 	return outer, deferStmt, nil
 }
 
-func checkLocksUsed(m map[string]*protected) []*analysisError {
+func checkLocksUsed(m map[string]*protectedData) []*analysisError {
 	var errors []*analysisError
 	for _, p := range m {
-		for _, u := range p.usagePositions {
+		for _, u := range p.usages {
 			found := false
 			var lockExpr *ast.SelectorExpr
-			ast.Inspect(u.enclosingFun, func(curr ast.Node) bool {
+			ast.Inspect(u.enclosingFunc, func(curr ast.Node) bool {
 				if curr == nil {
 					return false
 				}
@@ -281,12 +278,12 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 				}
 
 				// Return if the function call is outside the function or after the protected field access.
-				if curr.Pos() <= u.enclosingFun.Body.Pos() || curr.Pos() >= u.xID.Pos() {
+				if curr.Pos() <= u.enclosingFunc.Body.Pos() || curr.Pos() >= u.selectorXID.Pos() {
 					return false
 				}
 
 				/*
-					function expression must be a SelectorExpr because the following is not valid:
+					Function expression must be a SelectorExpr because the following is not valid:
 					s := s1{}      // a struct with a protected field and a mutex mu.
 					copyMu := s.mu // this copies mutex, i.e. copyMu.Lock() will not protect the field. This is reported
 						           // by go vet: "assignment copies lock value to mu: sync.Mutex".
@@ -302,7 +299,7 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 					return true
 				}
 
-				if sxid.Obj == u.xID.Obj {
+				if sxid.Obj == u.selectorXID.Obj {
 					found = true
 					lockExpr = fnSelector
 					return false
@@ -315,10 +312,10 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 				errors = append(errors, &analysisError{
 					msg: fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()",
 						getFieldName(p.field),
-						u.xID.Name,
+						u.selectorXID.Name,
 						getFieldName(p.lock),
 					),
-					pos: u.xID.Pos(),
+					pos: u.selectorXID.Pos(),
 				})
 			}
 		}
@@ -327,9 +324,9 @@ func checkLocksUsed(m map[string]*protected) []*analysisError {
 	return errors
 }
 
-func isUnlockCalled(u *usagePosition, lockExpr *ast.SelectorExpr) bool {
+func isUnlockCalled(u *usage, lockExpr *ast.SelectorExpr) bool {
 	unlocked := false
-	ast.Inspect(u.enclosingFun, func(curr ast.Node) bool {
+	ast.Inspect(u.enclosingFunc, func(curr ast.Node) bool {
 		if curr == nil {
 			return false
 		}
@@ -343,15 +340,12 @@ func isUnlockCalled(u *usagePosition, lockExpr *ast.SelectorExpr) bool {
 			return true
 		}
 
-		// Return if the function is not "Unlock". At this point we already checked that the lock implements
-		// sync.Locker interface, namely Unlock() function, hence it cannot have another function with
-		// a name Lock and arguments -- overloading is forbidden in go.
 		if fnSelector.Sel.Name != "Unlock" {
 			return true
 		}
 
-		withinRange := curr.Pos() > lockExpr.Pos() && curr.Pos() < u.xID.Pos()
-		// Return if the Unlock() is called before Lock() or after access to a protected field.
+		withinRange := curr.Pos() > lockExpr.Pos() && curr.Pos() < u.selectorXID.Pos()
+		// Return if the Unlock() is called before Lock() or after access to the protected field.
 		if !withinRange {
 			return false
 		}
@@ -373,7 +367,7 @@ func isUnlockCalled(u *usagePosition, lockExpr *ast.SelectorExpr) bool {
 			return true
 		}
 
-		if sxid.Obj == u.xID.Obj && withinRange {
+		if sxid.Obj == u.selectorXID.Obj {
 			// If Unlock() is called from within deferred function
 			_, deferStmt, _ := findEnclosingFunction(curr.Pos(), curr.End(), u.file)
 			// it must be the same deferred statement as the deferred statement where current usage happened.
