@@ -43,7 +43,6 @@ type protected struct {
 	field           *ast.Field
 	lock            *ast.Field
 	containerStruct *ast.TypeSpec
-	structType      types.Type
 	usagePositions  []*usagePosition
 }
 
@@ -62,8 +61,7 @@ var analyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (interface{}, error) {
-	structs := getStructs(pass.Files, pass.Fset)
-	protectedMap, errors := parseComments(pass, structs, testRun)
+	protectedMap, errors := parseComments(pass)
 	if errors != nil {
 		for _, e := range errors {
 			pass.Reportf(e.pos, e.Error())
@@ -96,76 +94,56 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	return nil, nil
 }
 
-func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.TypeSpec, testRun bool) (map[string]*protected, []*analysisError) {
+func parseComments(pass *analysis.Pass) (map[string]*protected, []*analysisError) {
 	res := make(map[string]*protected)
 	var errors []*analysisError
+
 	for _, f := range pass.Files {
-		fileName := pass.Fset.Position(f.Pos()).Filename
 		commentMap := ast.NewCommentMap(pass.Fset, f, f.Comments)
 
 		for node, commentMapGroups := range commentMap {
-			// Filter out nodes that are not fields. The linter only works for a struct fields protected
+			// Filter out nodes that are not fields. The linter only works for struct fields protected
 			// by another field.
 			field, ok := node.(*ast.Field)
 			if !ok {
 				continue
 			}
-			// skip embedded fields and blank identifiers
+			// Skip embedded fields and blank identifiers
 			fieldName := getFieldName(field)
 			if fieldName == "" || fieldName == "_" {
 				continue
 			}
 
-			for _, commentGroup := range commentMapGroups {
-				// In each case when get an error -- return early, i.e. break out from the loop.
-				for _, c := range commentGroup.List {
-					if !strings.Contains(strings.ToLower(c.Text), protectedBy) {
+		commentGroup:
+			for _, cg := range commentMapGroups {
+				for _, comment := range cg.List {
+					if !strings.Contains(strings.ToLower(comment.Text), protectedBy) {
 						continue
 					}
 
-					spec, err := getStructSpec(field, fileStructs[fileName])
-					if err != nil {
-						errors = append(errors, err)
-						break
+					spec := getEnclosingStruct(f, comment.Pos(), comment.End())
+					if spec == nil {
+						continue commentGroup
 					}
 
-					// check here instead out of the loop because want to skip struct search for fields without
-					// "protected by".
 					if token.IsExported(fieldName) {
 						errors = append(errors, &analysisError{
 							msg: fmt.Sprintf("exported protected field %s.%s", spec.Name, fieldName),
 							pos: field.Pos(),
 						})
-						break
-					}
-					// todo(mneverov): use pass.pkg.scope.parent.lookup instead
-					lock, err := getLockField(c, spec, testRun)
-					if err != nil {
-						errors = append(errors, err)
-						break
+						continue commentGroup
 					}
 
-					lockName := getFieldName(lock)
-					if !implementsLocker(pass, lock) {
-						errors = append(errors, &analysisError{
-							msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lockName),
-							pos: lock.Pos(),
-						})
-						break
-					}
-					if token.IsExported(lockName) {
-						errors = append(errors, &analysisError{
-							msg: fmt.Sprintf("exported mutex %s.%s", spec.Name, lockName),
-							pos: lock.Pos(),
-						})
-						break
+					lock, err := getLock(pass, spec, comment)
+					if err != nil {
+						errors = append(errors, err)
+						continue commentGroup
 					}
 
 					p := &protected{
 						field:           field,
 						lock:            lock,
 						containerStruct: spec,
-						structType:      pass.TypesInfo.TypeOf(spec.Type),
 					}
 
 					pName := protectedName(spec.Name.Name, fieldName)
@@ -179,99 +157,10 @@ func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.T
 	return res, errors
 }
 
-func getLockField(comment *ast.Comment, ts *ast.TypeSpec, testRun bool) (*ast.Field, *analysisError) {
-	lockName, err := getLockName(comment, testRun)
-	if err != nil {
-		return nil, err
-	}
-
-	st := ts.Type.(*ast.StructType)
-	if st.Fields == nil {
-		// Presence of the struct Name is checked in getStructSpec.
-		return nil, &analysisError{
-			msg: fmt.Sprintf("failed to find lock %q in struct %s: fieldList is nil", lockName, ts.Name.Name),
-			pos: comment.Pos(),
-		}
-	}
-
-	var lockField *ast.Field
-	found := false
-	for _, field := range st.Fields.List {
-		for _, n := range field.Names {
-			if lockName == n.Name {
-				lockField = field
-				found = true
-				break
-			}
-		}
-	}
-
-	if !found {
-		return nil, &analysisError{
-			msg: fmt.Sprintf("struct %q does not have lock field %q", ts.Name.Name, lockName),
-			pos: comment.Pos(),
-		}
-	}
-
-	return lockField, nil
-}
-
 func implementsLocker(pass *analysis.Pass, f *ast.Field) bool {
 	realType := pass.TypesInfo.TypeOf(f.Type)
 	ptrType := types.NewPointer(realType)
 	return types.Implements(realType, syncLocker) || types.Implements(ptrType, syncLocker)
-}
-
-func getStructSpec(field ast.Node, structs map[string]*ast.TypeSpec) (*ast.TypeSpec, *analysisError) {
-	found := false
-	var fieldStruct *ast.TypeSpec
-	for _, s := range structs {
-		if s.Pos() <= field.Pos() && s.End() >= field.End() {
-			fieldStruct = s
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return nil, &analysisError{
-			msg: fmt.Sprintf("failed to find a struct for %s", field),
-			pos: field.Pos(),
-		}
-	}
-
-	return fieldStruct, nil
-}
-
-func getStructs(files []*ast.File, fset *token.FileSet) map[string]map[string]*ast.TypeSpec {
-	structs := make(map[string]map[string]*ast.TypeSpec)
-	for _, f := range files {
-		fileName := fset.Position(f.Pos()).Filename
-		fileStructs := getFileStructs(f.Decls)
-		structs[fileName] = fileStructs
-	}
-
-	return structs
-}
-
-func getFileStructs(decls []ast.Decl) map[string]*ast.TypeSpec {
-	structs := make(map[string]*ast.TypeSpec)
-	for _, decl := range decls {
-		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.TYPE {
-			for _, spec := range genDecl.Specs {
-				if typeSpec, ok := spec.(*ast.TypeSpec); ok {
-					if typeSpec.Name == nil {
-						continue
-					}
-					if _, ok := typeSpec.Type.(*ast.StructType); ok {
-						structs[typeSpec.Name.Name] = typeSpec
-					}
-				}
-			}
-		}
-	}
-
-	return structs
 }
 
 // todo(mneverov): better naming func and map
@@ -496,6 +385,73 @@ func isUnlockCalled(u *usagePosition, lockExpr *ast.SelectorExpr) bool {
 	})
 
 	return unlocked
+}
+
+func getEnclosingStruct(f *ast.File, posStart, posEnd token.Pos) *ast.TypeSpec {
+	// Need TypeSpec here to get the struct name.
+	var spec *ast.TypeSpec
+	path, _ := astutil.PathEnclosingInterval(f, posStart, posEnd)
+	for _, p := range path {
+		if typeSpec, ok := p.(*ast.TypeSpec); ok {
+			if typeSpec.Name == nil {
+				continue
+			}
+			if _, ok := typeSpec.Type.(*ast.StructType); ok {
+				spec = typeSpec
+				break
+			}
+		}
+	}
+
+	return spec
+}
+
+func getLock(pass *analysis.Pass, spec *ast.TypeSpec, c *ast.Comment) (*ast.Field, *analysisError) {
+	lockName, err := getLockName(c, testRun)
+	if err != nil {
+		return nil, err
+	}
+
+	lock := getStructFieldByName(lockName, spec.Type.(*ast.StructType))
+	if lock == nil {
+		return nil, &analysisError{
+			msg: fmt.Sprintf("struct %q does not have lock field %q", spec.Name.Name, lockName),
+			pos: c.Pos(),
+		}
+	}
+
+	// Check if the lock field is exported after verifying that it exists. Otherwise may report
+	// "exported mutex" for not existing field.
+	if token.IsExported(lockName) {
+		return nil, &analysisError{
+			msg: fmt.Sprintf("exported mutex %s.%s", spec.Name.Name, lockName),
+			pos: lock.Pos(),
+		}
+	}
+
+	if !implementsLocker(pass, lock) {
+		return nil, &analysisError{
+			msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lockName),
+			pos: lock.Pos(),
+		}
+	}
+
+	return lock, nil
+}
+
+func getStructFieldByName(name string, st *ast.StructType) *ast.Field {
+	var lockField *ast.Field
+
+	for _, field := range st.Fields.List {
+		for _, n := range field.Names {
+			if name == n.Name {
+				lockField = field
+				break
+			}
+		}
+	}
+
+	return lockField
 }
 
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not
