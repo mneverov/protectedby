@@ -117,11 +117,6 @@ func parseComments(pass *analysis.Pass, fileStructs map[string]map[string]*ast.T
 			}
 
 			for _, commentGroup := range commentMapGroups {
-				// todo(mneverov): when a comment is a multiline comment
-				//  and on each line "protected by " is mentioned, then it should be handled differently.
-				//  maybe add an error when another "protected by" is found, or when find the first "protected by"
-				//  then break (current behavior).
-
 				// In each case when get an error -- return early, i.e. break out from the loop.
 				for _, c := range commentGroup.List {
 					if !strings.Contains(strings.ToLower(c.Text), protectedBy) {
