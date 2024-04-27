@@ -1,4 +1,4 @@
-package main
+package protectedby
 
 import (
 	"fmt"
@@ -53,7 +53,7 @@ type usage struct {
 	deferStmt     *ast.DeferStmt
 }
 
-var analyzer = &analysis.Analyzer{
+var Analyzer = &analysis.Analyzer{
 	Name:     "protectedby",
 	Doc:      "Checks that access to shared resources is protected.",
 	Run:      run,
@@ -81,7 +81,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		}
 	}
 
-	errors = checkLocksUsed(protectedMap)
+	errors = checkLocksUsed(pass, protectedMap)
 	if errors != nil {
 		for _, e := range errors {
 			pass.Reportf(e.pos, e.Error())
@@ -240,7 +240,7 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 	return outer, deferStmt, nil
 }
 
-func checkLocksUsed(m map[string]*protectedData) []*analysisError {
+func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysisError {
 	var errors []*analysisError
 	for _, p := range m {
 		for _, u := range p.usages {
@@ -299,7 +299,7 @@ func checkLocksUsed(m map[string]*protectedData) []*analysisError {
 					return true
 				}
 
-				if sxid.Obj == u.selectorXID.Obj {
+				if pass.TypesInfo.ObjectOf(sxid) == pass.TypesInfo.ObjectOf(u.selectorXID) {
 					found = true
 					lockExpr = fnSelector
 					return false
@@ -308,7 +308,7 @@ func checkLocksUsed(m map[string]*protectedData) []*analysisError {
 				return true
 			})
 
-			if !found || isUnlockCalled(u, lockExpr) {
+			if !found || isUnlockCalled(pass, u, lockExpr) {
 				errors = append(errors, &analysisError{
 					msg: fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()",
 						getFieldName(p.field),
@@ -324,7 +324,7 @@ func checkLocksUsed(m map[string]*protectedData) []*analysisError {
 	return errors
 }
 
-func isUnlockCalled(u *usage, lockExpr *ast.SelectorExpr) bool {
+func isUnlockCalled(pass *analysis.Pass, u *usage, lockExpr *ast.SelectorExpr) bool {
 	unlocked := false
 	ast.Inspect(u.enclosingFunc, func(curr ast.Node) bool {
 		if curr == nil {
@@ -367,7 +367,7 @@ func isUnlockCalled(u *usage, lockExpr *ast.SelectorExpr) bool {
 			return true
 		}
 
-		if sxid.Obj == u.selectorXID.Obj {
+		if pass.TypesInfo.ObjectOf(sxid) == pass.TypesInfo.ObjectOf(u.selectorXID) {
 			// If Unlock() is called from within deferred function
 			_, deferStmt, _ := findEnclosingFunction(curr.Pos(), curr.End(), u.file)
 			// it must be the same deferred statement as the deferred statement where current usage happened.

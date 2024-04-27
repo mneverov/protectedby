@@ -1,7 +1,10 @@
 package main
 
-import "golang.org/x/tools/go/analysis/singlechecker"
+import (
+	"github.com/mneverov/protectedby/protectedby"
+	"golang.org/x/tools/go/analysis/singlechecker"
+)
 
 func main() {
-	singlechecker.Main(analyzer)
+	singlechecker.Main(protectedby.Analyzer)
 }

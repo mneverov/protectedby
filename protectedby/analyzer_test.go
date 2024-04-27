@@ -1,4 +1,4 @@
-package main
+package protectedby
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ import (
 
 func TestAll(t *testing.T) {
 	testRun = true
-	analysistest.Run(t, analysistest.TestData(), analyzer, "./...")
+	analysistest.Run(t, analysistest.TestData(), Analyzer, "./...")
 }
 
 func Test_getLockName(t *testing.T) {
