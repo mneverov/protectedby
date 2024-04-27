@@ -14,13 +14,14 @@ type outer struct {
 
 func nestedAccess() {
 	o := outer{}
-	o.n.i = 42 //  todo(mneverov): want ...
+	// todo(mneverov): access to a protected field of a nested struct is not reported.
+	o.n.i = 42
 }
 
 func nestedFunction1() {
 	s := inner{}
 	f := func() {
-		// just don't do this otherwise you get a false positive warning
+		// Just don't do this otherwise you get a false positive warning.
 		s.i = 42 // want `not protected access to shared field i, use s.mu.Lock()`
 	}
 
@@ -36,4 +37,17 @@ func nestedFunction2() {
 	func() {
 		s.i = 42
 	}()
+}
+
+func nestedFun() {
+	f := inner{}
+
+	Unlock := func() {
+		f.mu.Unlock()
+	}
+	f.mu.Lock()
+	Unlock()
+
+	// Not protected access is not reported.
+	f.i = 42
 }
