@@ -2,14 +2,14 @@ package protectedby
 
 import "sync"
 
-type exportedProtected struct {
+type exportedProtectedStruct struct {
 	// ProtectedField is protected by mu.
-	ProtectedField int // want `exported protected field exportedProtected.ProtectedField`
+	ProtectedField int // want `exported protected field exportedProtectedStruct.ProtectedField`
 	mu             sync.Mutex
 }
 
-type exportedMutex struct {
+type exportedMutexStruct struct {
 	// i is protected by ExportedMu.
 	i          int
-	ExportedMu sync.Mutex // want `exported mutex exportedMutex.ExportedMu`
+	ExportedMu sync.Mutex // want `exported mutex exportedMutexStruct.ExportedMu`
 }
