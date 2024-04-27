@@ -1,4 +1,4 @@
-package main
+package protectedby
 
 import (
 	"fmt"
@@ -53,7 +53,7 @@ type usage struct {
 	deferStmt     *ast.DeferStmt
 }
 
-var analyzer = &analysis.Analyzer{
+var Analyzer = &analysis.Analyzer{
 	Name:     "protectedby",
 	Doc:      "Checks that access to shared resources is protected.",
 	Run:      run,
