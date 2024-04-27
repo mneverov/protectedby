@@ -121,10 +121,6 @@ func parseComments(pass *analysis.Pass) (map[string]*protected, []*analysisError
 						continue
 					}
 
-					// todo(mneverov): optimisation for the struct lookup.
-					//  For each file create a map & store already found structs with
-					//  the struct positions. For each "protected by" check if the comment
-					//  positions are inside already found structs.
 					spec := getEnclosingStruct(f, comment.Pos(), comment.End())
 					if spec == nil {
 						continue commentGroup
