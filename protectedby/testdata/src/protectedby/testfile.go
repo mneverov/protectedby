@@ -42,6 +42,11 @@ type s1 struct {
 	protectedField6 int
 	// protectedField7 is some shared resource. Protected by mu. Pattern is compared ignoring case.
 	protectedField7 *int
+
+	protectedField8 int
+	// protectedField8 is protected by mu.
+	// This is an example when a comment is associated with a node it follows.
+
 	// field1 is protected by: mu. It is NOT checked by the linter because of the semicolon.
 	field1 int
 	// field2 is protected by mu and protected by mu.// want `found 2 "protected by " in comment "// field2 is protected by mu and protected by mu.", expected exact one`
@@ -69,6 +74,7 @@ func (s *s1) func1() {
 			// nothing interesting here
 		}
 	}
+	s.protectedField8 = 42 // want `not protected access to shared field protectedField8, use s.mu.Lock()`
 }
 
 // func2 demonstrates protected access.
