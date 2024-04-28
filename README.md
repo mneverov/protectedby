@@ -25,4 +25,4 @@ func foo() {
 }
 ```
 
-For more info see [tests](./testdata/src/protectedby).
+For more info see [tests](./protectedby/testdata/src/protectedby).
