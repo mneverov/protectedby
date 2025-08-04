@@ -64,7 +64,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	protectedMap, errors := parseComments(pass)
 	if errors != nil {
 		for _, e := range errors {
-			pass.Reportf(e.pos, e.Error())
+			pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
 		}
 		if !testRun {
 			return nil, nil
@@ -74,7 +74,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	errors = addUsages(pass, protectedMap)
 	if errors != nil {
 		for _, e := range errors {
-			pass.Reportf(e.pos, e.Error())
+			pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
 		}
 		if !testRun {
 			return nil, nil
@@ -84,7 +84,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	errors = checkLocksUsed(pass, protectedMap)
 	if errors != nil {
 		for _, e := range errors {
-			pass.Reportf(e.pos, e.Error())
+			pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
 		}
 		if !testRun {
 			return nil, nil
