@@ -254,11 +254,7 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 				// Access to a protected field can be deferred. Skip node if this is a defer statement
 				// that is not the same where the field is accessed.
 				if deferStmt, ok := curr.(*ast.DeferStmt); ok {
-					if deferStmt == u.deferStmt {
-						return true
-					} else {
-						return false
-					}
+					return deferStmt == u.deferStmt
 				}
 
 				cexpr, ok := curr.(*ast.CallExpr)
