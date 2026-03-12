@@ -430,18 +430,15 @@ func getLock(pass *analysis.Pass, spec *ast.TypeSpec, c *ast.Comment) (*ast.Fiel
 }
 
 func getStructFieldByName(name string, st *ast.StructType) *ast.Field {
-	var lockField *ast.Field
-
 	for _, field := range st.Fields.List {
 		for _, n := range field.Names {
 			if name == n.Name {
-				lockField = field
-				break
+				return field
 			}
 		}
 	}
 
-	return lockField
+	return nil
 }
 
 // getLockName returns the first word in the comment after "protected by" statement or error if the statement is not

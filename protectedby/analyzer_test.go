@@ -83,7 +83,7 @@ func Test_getLockName(t *testing.T) {
 			}
 
 			if name != tc.expectedLockName {
-				t.Fatalf("expected lock name %q, got %q", tc.expectedError, err)
+				t.Fatalf("expected lock name %q, got %q", tc.expectedLockName, name)
 			}
 		})
 	}
