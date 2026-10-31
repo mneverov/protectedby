@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -51,6 +52,8 @@ type usage struct {
 	selectorXID   *ast.Ident
 	enclosingFunc *ast.FuncDecl
 	deferStmt     *ast.DeferStmt
+	// write is true if the access may modify the field, see isWrite. For reads, RLock() is enough.
+	write bool
 }
 
 var Analyzer = &analysis.Analyzer{
@@ -60,7 +63,7 @@ var Analyzer = &analysis.Analyzer{
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 }
 
-func run(pass *analysis.Pass) (interface{}, error) {
+func run(pass *analysis.Pass) (any, error) {
 	protectedMap, errors := parseComments(pass)
 	if errors != nil {
 		for _, e := range errors {
@@ -140,6 +143,13 @@ func parseComments(pass *analysis.Pass) (map[string]*protectedData, []*analysisE
 						continue commentGroup
 					}
 
+					// A comment about the fields guarded by a lock is often attached to the lock itself, e.g.
+					// "// lines and infos are protected by mutex" above the mutex field in go/token.File.
+					// A lock cannot protect itself.
+					if lock == field {
+						continue commentGroup
+					}
+
 					p := &protectedData{
 						field:           field,
 						lock:            lock,
@@ -167,12 +177,13 @@ func addUsages(pass *analysis.Pass, protectedMap map[string]*protectedData) []*a
 	var errors []*analysisError
 
 	for _, file := range pass.Files {
-		ast.Inspect(file, func(n ast.Node) bool {
+		ast.PreorderStack(file, nil, func(n ast.Node, stack []ast.Node) bool {
 			switch se := n.(type) {
 			case *ast.SelectorExpr:
 				id, ok := se.X.(*ast.Ident)
 				if !ok {
-					return false
+					// Descend: in s.f.x and s.f.m() the protected field is the inner selector s.f.
+					return true
 				}
 
 				xtyp := deref(pass.TypesInfo.TypeOf(se.X))
@@ -200,6 +211,7 @@ func addUsages(pass *analysis.Pass, protectedMap map[string]*protectedData) []*a
 					selectorXID:   id,
 					enclosingFunc: fn,
 					deferStmt:     deferStmt,
+					write:         isWrite(pass.TypesInfo, se, stack),
 				})
 
 				return false
@@ -210,6 +222,61 @@ func addUsages(pass *analysis.Pass, protectedMap map[string]*protectedData) []*a
 	}
 
 	return errors
+}
+
+// isWrite reports whether the access to the field selected by se may modify the field or the data it refers to.
+// stack holds the ancestors of se, the innermost last. Starting from se, it walks up through expressions that
+// project the field (s.f.x, s.f[i], *s.f, s.f[i:j], (s.f)) and classifies the first other ancestor. Writes through
+// copies (m := s.f; m[k] = v) or through callees are not detected.
+func isWrite(info *types.Info, se *ast.SelectorExpr, stack []ast.Node) bool {
+	var n ast.Expr = se
+	for _, s := range slices.Backward(stack) {
+		switch p := s.(type) {
+		case *ast.ParenExpr, *ast.StarExpr:
+		case *ast.SelectorExpr:
+			// A method call on the field modifies it if the receiver is a pointer: s.f.inc().
+			if sel, ok := info.Selections[p]; ok && sel.Kind() == types.MethodVal {
+				_, ptrRecv := sel.Obj().(*types.Func).Signature().Recv().Type().(*types.Pointer)
+				return ptrRecv
+			}
+		case *ast.IndexExpr:
+			if p.X != n {
+				return false // The field is the index: s.sl[s.n].
+			}
+		case *ast.SliceExpr:
+			if p.X != n {
+				return false // The field is a slice bound: s.sl[s.n:].
+			}
+		case *ast.AssignStmt:
+			return slices.Contains(p.Lhs, n)
+		case *ast.IncDecStmt:
+			return true
+		case *ast.UnaryExpr:
+			return p.Op == token.AND
+		case *ast.RangeStmt:
+			// "for s.f = range x" and "for _, s.f = range x" assign the field on every iteration. With ":=" the key
+			// and value are new variables, so a field cannot appear there. Ranging over the field, as in
+			// "for k := range s.f", is a read.
+			return p.Tok == token.ASSIGN && (p.Key == n || p.Value == n)
+		case *ast.CallExpr:
+			// delete(s.m, k), clear(s.m), copy(s.sl, src).
+			return len(p.Args) > 0 && p.Args[0] == n && isBuiltin(info, p.Fun, "delete", "clear", "copy")
+		default:
+			return false
+		}
+		// Only the projecting expressions above reach this point.
+		n = s.(ast.Expr)
+	}
+	return false
+}
+
+func isBuiltin(info *types.Info, fun ast.Expr, names ...string) bool {
+	id, ok := ast.Unparen(fun).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	b, ok := info.Uses[id].(*types.Builtin)
+	return ok && slices.Contains(names, b.Name())
 }
 
 func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl, *ast.DeferStmt, *analysisError) {
@@ -267,10 +334,12 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 					return true
 				}
 
-				// Return if the function is not "Lock". At this point we already checked that the lock implements
-				// sync.Locker interface, namely Lock() function, hence it cannot have another function with
-				// a name Lock and arguments -- overloading is forbidden in go.
-				if fnSelector.Sel.Name != "Lock" {
+				// Return if the function is not "Lock", or "RLock" for a read. At this point we already checked that
+				// the lock implements sync.Locker interface, namely Lock() function, hence it cannot have another
+				// function with a name Lock and arguments -- overloading is forbidden in go. RLock() compiles only
+				// if the lock has it, e.g. sync.RWMutex.
+				name := fnSelector.Sel.Name
+				if name != "Lock" && (u.write || name != "RLock") {
 					return true
 				}
 
@@ -322,7 +391,7 @@ func isUnlockCalled(pass *analysis.Pass, u *usage, lockExpr *ast.SelectorExpr, l
 			return true
 		}
 
-		if fnSelector.Sel.Name != "Unlock" {
+		if fnSelector.Sel.Name != "Unlock" && fnSelector.Sel.Name != "RUnlock" {
 			return true
 		}
 
