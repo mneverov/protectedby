@@ -243,6 +243,7 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysisError {
 	var errors []*analysisError
 	for _, p := range m {
+		lockName := getFieldName(p.lock)
 		for _, u := range p.usages {
 			found := false
 			var lockExpr *ast.SelectorExpr
@@ -278,38 +279,23 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 					return false
 				}
 
-				/*
-					Function expression must be a SelectorExpr because the following is not valid:
-					s := s1{}      // a struct with a protected field and a mutex mu.
-					copyMu := s.mu // this copies mutex, i.e. copyMu.Lock() will not protect the field. This is reported
-						           // by go vet: "assignment copies lock value to mu: sync.Mutex".
-					copyMu.Lock()
-				*/
-				selExpr, ok := fnSelector.X.(*ast.SelectorExpr)
-				if !ok {
+				if !isLockFieldOf(pass, fnSelector, lockName, u.selectorXID) {
 					return true
 				}
 
-				sxid, ok := selExpr.X.(*ast.Ident)
-				if !ok {
-					return true
-				}
-
-				if pass.TypesInfo.ObjectOf(sxid) == pass.TypesInfo.ObjectOf(u.selectorXID) {
-					found = true
-					lockExpr = fnSelector
-					return false
-				}
-
-				return true
+				// ast.Inspect continues with the siblings, so the last Lock() before the access wins and
+				// Lock(); Unlock(); Lock() counts as locked.
+				found = true
+				lockExpr = fnSelector
+				return false
 			})
 
-			if !found || isUnlockCalled(pass, u, lockExpr) {
+			if !found || isUnlockCalled(pass, u, lockExpr, lockName) {
 				errors = append(errors, &analysisError{
 					msg: fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()",
 						getFieldName(p.field),
 						u.selectorXID.Name,
-						getFieldName(p.lock),
+						lockName,
 					),
 					pos: u.selectorXID.Pos(),
 				})
@@ -320,7 +306,7 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 	return errors
 }
 
-func isUnlockCalled(pass *analysis.Pass, u *usage, lockExpr *ast.SelectorExpr) bool {
+func isUnlockCalled(pass *analysis.Pass, u *usage, lockExpr *ast.SelectorExpr, lockName string) bool {
 	unlocked := false
 	ast.Inspect(u.enclosingFunc, func(curr ast.Node) bool {
 		if curr == nil {
@@ -346,35 +332,42 @@ func isUnlockCalled(pass *analysis.Pass, u *usage, lockExpr *ast.SelectorExpr) b
 			return false
 		}
 
-		/*
-			function expression must be a SelectorExpr because the following is not valid:
-			s := s1{}      // a struct with a protected field and a mutex mu.
-			copyMu := s.mu // this copies mutex, i.e. copyMu.Lock() will not protect the field. This is reported
-				           // by go vet: "assignment copies lock value to mu: sync.Mutex".
-			copyMu.Lock()
-		*/
-		selExpr, ok := fnSelector.X.(*ast.SelectorExpr)
-		if !ok {
+		if !isLockFieldOf(pass, fnSelector, lockName, u.selectorXID) {
 			return true
 		}
 
-		sxid, ok := selExpr.X.(*ast.Ident)
-		if !ok {
-			return true
+		// An Unlock() in another deferred statement does not run before the access, so it neither
+		// unlocks nor cancels an earlier Unlock().
+		_, deferStmt, _ := findEnclosingFunction(curr.Pos(), curr.End(), u.file)
+		if deferStmt == u.deferStmt {
+			unlocked = true
 		}
-
-		if pass.TypesInfo.ObjectOf(sxid) == pass.TypesInfo.ObjectOf(u.selectorXID) {
-			// If Unlock() is called from within deferred function
-			_, deferStmt, _ := findEnclosingFunction(curr.Pos(), curr.End(), u.file)
-			// it must be the same deferred statement as the deferred statement where current usage happened.
-			unlocked = deferStmt == u.deferStmt
-			return false
-		}
-
-		return true
+		return false
 	})
 
 	return unlocked
+}
+
+// isLockFieldOf reports whether fnSelector is <x>.<lockName>.<Method> where x is the same object as accessor.
+func isLockFieldOf(pass *analysis.Pass, fnSelector *ast.SelectorExpr, lockName string, accessor *ast.Ident) bool {
+	/*
+		Function expression must be a SelectorExpr because the following is not valid:
+		s := s1{}      // a struct with a protected field and a mutex mu.
+		copyMu := s.mu // this copies mutex, i.e. copyMu.Lock() will not protect the field. This is reported
+			           // by go vet: "assignment copies lock value to mu: sync.Mutex".
+		copyMu.Lock()
+	*/
+	selExpr, ok := fnSelector.X.(*ast.SelectorExpr)
+	if !ok || selExpr.Sel.Name != lockName {
+		return false
+	}
+
+	sxid, ok := selExpr.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+
+	return pass.TypesInfo.ObjectOf(sxid) == pass.TypesInfo.ObjectOf(accessor)
 }
 
 func getEnclosingStruct(f *ast.File, posStart, posEnd token.Pos) *ast.TypeSpec {
