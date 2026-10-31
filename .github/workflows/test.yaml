@@ -17,10 +17,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '>=1.22'
+          go-version-file: go.mod
 
       - name: Build
         run: go build -v ./...
 
       - name: Test
         run: go test -v ./...
+
+      # analysistest loads dependencies from source, so tests pass even when the
+      # binary cannot read the toolchain's export data. Run the binary itself.
+      - name: Run binary
+        run: |
+          go build -o "$RUNNER_TEMP/protectedby" .
+          "$RUNNER_TEMP/protectedby" ./...
