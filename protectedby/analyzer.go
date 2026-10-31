@@ -484,7 +484,9 @@ func isLetterOrNumber(c rune) bool {
 	return !unicode.IsLetter(c) && !unicode.IsNumber(c)
 }
 
+// deref strips aliases and pointers, e.g. *A with type A = S yields S.
 func deref(T types.Type) types.Type {
+	T = types.Unalias(T)
 	if p, ok := T.Underlying().(*types.Pointer); ok {
 		return deref(p.Elem())
 	}
