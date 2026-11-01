@@ -41,8 +41,10 @@ func (e analysisError) Error() string {
 }
 
 type protectedData struct {
-	field           *ast.Field
-	lock            *ast.Field
+	field *ast.Field
+	// lockName is the lock field's name from the comment. A field such as "muA, muB sync.Mutex" has several names,
+	// so the name cannot be taken from the lock's *ast.Field.
+	lockName        string
 	enclosingStruct *ast.TypeSpec
 	usages          []*usage
 }
@@ -115,7 +117,7 @@ func parseComments(pass *analysis.Pass) (map[string]*protectedData, []*analysisE
 						continue commentGroup
 					}
 
-					lock, err := getLock(pass, spec, comment)
+					lock, lockName, err := getLock(pass, spec, comment)
 					if err != nil {
 						errors = append(errors, err)
 						continue commentGroup
@@ -130,7 +132,7 @@ func parseComments(pass *analysis.Pass) (map[string]*protectedData, []*analysisE
 
 					p := &protectedData{
 						field:           field,
-						lock:            lock,
+						lockName:        lockName,
 						enclosingStruct: spec,
 					}
 
@@ -288,7 +290,6 @@ func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl,
 func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysisError {
 	var errors []*analysisError
 	for _, p := range m {
-		lockName := getFieldName(p.lock)
 		for _, u := range p.usages {
 			found := false
 			var lockExpr *ast.SelectorExpr
@@ -326,7 +327,7 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 					return false
 				}
 
-				if !isLockFieldOf(pass, fnSelector, lockName, u.selectorXID) {
+				if !isLockFieldOf(pass, fnSelector, p.lockName, u.selectorXID) {
 					return true
 				}
 
@@ -337,12 +338,12 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 				return false
 			})
 
-			if !found || isUnlockCalled(pass, u, lockExpr, lockName) {
+			if !found || isUnlockCalled(pass, u, lockExpr, p.lockName) {
 				errors = append(errors, &analysisError{
 					msg: fmt.Sprintf("not protected access to shared field %s, use %s.%s.Lock()",
 						getFieldName(p.field),
 						u.selectorXID.Name,
-						lockName,
+						p.lockName,
 					),
 					pos: u.selectorXID.Pos(),
 				})
@@ -436,15 +437,15 @@ func getEnclosingStruct(f *ast.File, posStart, posEnd token.Pos) *ast.TypeSpec {
 	return spec
 }
 
-func getLock(pass *analysis.Pass, spec *ast.TypeSpec, c *ast.Comment) (*ast.Field, *analysisError) {
+func getLock(pass *analysis.Pass, spec *ast.TypeSpec, c *ast.Comment) (*ast.Field, string, *analysisError) {
 	lockName, err := getLockName(c, testRun)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	lock := getStructFieldByName(lockName, spec.Type.(*ast.StructType))
 	if lock == nil {
-		return nil, &analysisError{
+		return nil, "", &analysisError{
 			msg: fmt.Sprintf("struct %q does not have lock field %q", spec.Name.Name, lockName),
 			pos: c.Pos(),
 		}
@@ -453,20 +454,20 @@ func getLock(pass *analysis.Pass, spec *ast.TypeSpec, c *ast.Comment) (*ast.Fiel
 	// Check if the lock field is exported after verifying that it exists. Otherwise may report
 	// "exported mutex" for not existing field.
 	if token.IsExported(lockName) {
-		return nil, &analysisError{
+		return nil, "", &analysisError{
 			msg: fmt.Sprintf("exported mutex %s.%s", spec.Name.Name, lockName),
 			pos: lock.Pos(),
 		}
 	}
 
 	if !implementsLocker(pass, lock) {
-		return nil, &analysisError{
+		return nil, "", &analysisError{
 			msg: fmt.Sprintf("lock %s doesn't implement sync.Locker interface", lockName),
 			pos: lock.Pos(),
 		}
 	}
 
-	return lock, nil
+	return lock, lockName, nil
 }
 
 func getStructFieldByName(name string, st *ast.StructType) *ast.Field {
