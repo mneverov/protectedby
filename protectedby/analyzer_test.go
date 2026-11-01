@@ -13,6 +13,13 @@ func TestAll(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), Analyzer, "./...")
 }
 
+// TestProductionRun runs the analyzer with testRun unset, as the binary does. The "want" comments in its testdata
+// must not contain "protected by", because getLockName strips them only in tests.
+func TestProductionRun(t *testing.T) {
+	testRun = false
+	analysistest.Run(t, analysistest.TestData(), Analyzer, "malformed")
+}
+
 func Test_getLockName(t *testing.T) {
 	const lockName = "testLockName"
 

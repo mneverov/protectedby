@@ -63,37 +63,15 @@ var Analyzer = &analysis.Analyzer{
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 }
 
+// run reports the errors of all phases. A malformed comment only drops its own field, so the remaining fields are
+// still checked.
 func run(pass *analysis.Pass) (any, error) {
 	protectedMap, errors := parseComments(pass)
-	if errors != nil {
-		for _, e := range errors {
-			pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
-		}
-		if !testRun {
-			return nil, nil
-		}
+	errors = append(errors, addUsages(pass, protectedMap)...)
+	errors = append(errors, checkLocksUsed(pass, protectedMap)...)
+	for _, e := range errors {
+		pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
 	}
-
-	errors = addUsages(pass, protectedMap)
-	if errors != nil {
-		for _, e := range errors {
-			pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
-		}
-		if !testRun {
-			return nil, nil
-		}
-	}
-
-	errors = checkLocksUsed(pass, protectedMap)
-	if errors != nil {
-		for _, e := range errors {
-			pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
-		}
-		if !testRun {
-			return nil, nil
-		}
-	}
-
 	return nil, nil
 }
 
