@@ -11,7 +11,8 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/ast/edge"
+	"golang.org/x/tools/go/ast/inspector"
 )
 
 const (
@@ -50,9 +51,9 @@ type protectedData struct {
 }
 
 type usage struct {
-	file          *ast.File
-	selectorXID   *ast.Ident
-	enclosingFunc *ast.FuncDecl
+	selectorXID *ast.Ident
+	// enclosingFunc points to the *ast.FuncDecl that contains the access.
+	enclosingFunc inspector.Cursor
 	deferStmt     *ast.DeferStmt
 	// write is true if the access may modify the field, see isWrite. For reads, RLock() is enough.
 	write bool
@@ -68,8 +69,9 @@ var Analyzer = &analysis.Analyzer{
 // run reports the errors of all phases. A malformed comment only drops its own field, so the remaining fields are
 // still checked.
 func run(pass *analysis.Pass) (any, error) {
-	protectedMap, errors := parseComments(pass)
-	errors = append(errors, addUsages(pass, protectedMap)...)
+	root := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector).Root()
+	protectedMap, errors := parseComments(pass, root)
+	errors = append(errors, addUsages(pass, root, protectedMap)...)
 	errors = append(errors, checkLocksUsed(pass, protectedMap)...)
 	for _, e := range errors {
 		pass.Report(analysis.Diagnostic{Pos: e.pos, Message: e.Error()})
@@ -77,7 +79,7 @@ func run(pass *analysis.Pass) (any, error) {
 	return nil, nil
 }
 
-func parseComments(pass *analysis.Pass) (map[string]*protectedData, []*analysisError) {
+func parseComments(pass *analysis.Pass, root inspector.Cursor) (map[string]*protectedData, []*analysisError) {
 	res := make(map[string]*protectedData)
 	var errors []*analysisError
 
@@ -104,7 +106,7 @@ func parseComments(pass *analysis.Pass) (map[string]*protectedData, []*analysisE
 						continue
 					}
 
-					spec := getEnclosingStruct(f, comment.Pos(), comment.End())
+					spec := getEnclosingStruct(root, comment.Pos(), comment.End())
 					if spec == nil {
 						continue commentGroup
 					}
@@ -153,101 +155,84 @@ func implementsLocker(pass *analysis.Pass, f *ast.Field) bool {
 	return types.Implements(realType, syncLocker) || types.Implements(ptrType, syncLocker)
 }
 
-func addUsages(pass *analysis.Pass, protectedMap map[string]*protectedData) []*analysisError {
+func addUsages(pass *analysis.Pass, root inspector.Cursor, protectedMap map[string]*protectedData) []*analysisError {
 	var errors []*analysisError
 
-	for _, file := range pass.Files {
-		ast.PreorderStack(file, nil, func(n ast.Node, stack []ast.Node) bool {
-			switch se := n.(type) {
-			case *ast.SelectorExpr:
-				id, ok := se.X.(*ast.Ident)
-				if !ok {
-					// Descend: in s.f.x and s.f.m() the protected field is the inner selector s.f.
-					return true
-				}
+	for cur := range root.Preorder((*ast.SelectorExpr)(nil)) {
+		se := cur.Node().(*ast.SelectorExpr)
+		id, ok := se.X.(*ast.Ident)
+		if !ok {
+			// In s.f.x and s.f.m() the protected field is the inner selector s.f, which Preorder visits next.
+			continue
+		}
 
-				xtyp := deref(pass.TypesInfo.TypeOf(se.X))
-				// The type of the accessor must be named.
-				named, ok := xtyp.(*types.Named)
-				if !ok {
-					return false
-				}
+		xtyp := deref(pass.TypesInfo.TypeOf(se.X))
+		// The type of the accessor must be named.
+		named, ok := xtyp.(*types.Named)
+		if !ok {
+			continue
+		}
 
-				// Use typed name to lookup a corresponding protected field.
-				pName := protectedName(named.Obj().Name(), se.Sel.Name)
-				p, ok := protectedMap[pName]
-				if !ok {
-					return false
-				}
+		// Use typed name to lookup a corresponding protected field.
+		pName := protectedName(named.Obj().Name(), se.Sel.Name)
+		p, ok := protectedMap[pName]
+		if !ok {
+			continue
+		}
 
-				fn, deferStmt, err := findEnclosingFunction(se.X.Pos(), se.X.End(), file)
-				if err != nil {
-					errors = append(errors, err)
-					return false
-				}
+		fn, deferStmt, ok := enclosingFunction(cur)
+		if !ok {
+			errors = append(errors, &analysisError{
+				msg: "no enclosing function",
+				pos: se.X.Pos(),
+			})
+			continue
+		}
 
-				p.usages = append(p.usages, &usage{
-					file:          file,
-					selectorXID:   id,
-					enclosingFunc: fn,
-					deferStmt:     deferStmt,
-					write:         isWrite(pass.TypesInfo, se, stack),
-				})
-
-				return false
-			}
-
-			return true
+		p.usages = append(p.usages, &usage{
+			selectorXID:   id,
+			enclosingFunc: fn,
+			deferStmt:     deferStmt,
+			write:         isWrite(pass.TypesInfo, cur),
 		})
 	}
 
 	return errors
 }
 
-// isWrite reports whether the access to the field selected by se may modify the field or the data it refers to.
-// stack holds the ancestors of se, the innermost last. Starting from se, it walks up through expressions that
-// project the field (s.f.x, s.f[i], *s.f, s.f[i:j], (s.f)) and classifies the first other ancestor. Writes through
-// copies (m := s.f; m[k] = v) or through callees are not detected.
-func isWrite(info *types.Info, se *ast.SelectorExpr, stack []ast.Node) bool {
-	var n ast.Expr = se
-	for _, s := range slices.Backward(stack) {
-		switch p := s.(type) {
-		case *ast.ParenExpr, *ast.StarExpr:
-		case *ast.SelectorExpr:
+// isWrite reports whether the access to the field selected by cur may modify the field or the data it refers to.
+// Starting from cur, it walks up through expressions that project the field (s.f.x, s.f[i], *s.f, s.f[i:j], (s.f))
+// and classifies the edge to the first other ancestor. Writes through copies (m := s.f; m[k] = v) or through callees
+// are not detected.
+func isWrite(info *types.Info, cur inspector.Cursor) bool {
+	for ; ; cur = cur.Parent() {
+		k, idx := cur.ParentEdge()
+		switch k {
+		case edge.ParenExpr_X, edge.StarExpr_X, edge.IndexExpr_X, edge.SliceExpr_X:
+		case edge.SelectorExpr_X:
 			// A method call on the field modifies it if the receiver is a pointer: s.f.inc().
-			if sel, ok := info.Selections[p]; ok && sel.Kind() == types.MethodVal {
+			if sel, ok := info.Selections[cur.Parent().Node().(*ast.SelectorExpr)]; ok && sel.Kind() == types.MethodVal {
 				_, ptrRecv := sel.Obj().(*types.Func).Signature().Recv().Type().(*types.Pointer)
 				return ptrRecv
 			}
-		case *ast.IndexExpr:
-			if p.X != n {
-				return false // The field is the index: s.sl[s.n].
-			}
-		case *ast.SliceExpr:
-			if p.X != n {
-				return false // The field is a slice bound: s.sl[s.n:].
-			}
-		case *ast.AssignStmt:
-			return slices.Contains(p.Lhs, n)
-		case *ast.IncDecStmt:
+		case edge.AssignStmt_Lhs, edge.IncDecStmt_X:
 			return true
-		case *ast.UnaryExpr:
-			return p.Op == token.AND
-		case *ast.RangeStmt:
+		case edge.UnaryExpr_X:
+			return cur.Parent().Node().(*ast.UnaryExpr).Op == token.AND
+		case edge.RangeStmt_Key, edge.RangeStmt_Value:
 			// "for s.f = range x" and "for _, s.f = range x" assign the field on every iteration. With ":=" the key
 			// and value are new variables, so a field cannot appear there. Ranging over the field, as in
-			// "for k := range s.f", is a read.
-			return p.Tok == token.ASSIGN && (p.Key == n || p.Value == n)
-		case *ast.CallExpr:
+			// "for k := range s.f", is a read: edge.RangeStmt_X.
+			return cur.Parent().Node().(*ast.RangeStmt).Tok == token.ASSIGN
+		case edge.CallExpr_Args:
 			// delete(s.m, k), clear(s.m), copy(s.sl, src).
-			return len(p.Args) > 0 && p.Args[0] == n && isBuiltin(info, p.Fun, "delete", "clear", "copy")
+			return idx == 0 && isBuiltin(info, cur.Parent().Node().(*ast.CallExpr).Fun, "delete", "clear", "copy")
 		default:
+			// Includes the field used as an index or a slice bound (s.sl[s.n], s.sl[s.n:]), the right-hand side of
+			// an assignment, and the top of the tree (edge.Invalid).
 			return false
 		}
-		// Only the projecting expressions above reach this point.
-		n = s.(ast.Expr)
 	}
-	return false
 }
 
 func isBuiltin(info *types.Info, fun ast.Expr, names ...string) bool {
@@ -259,32 +244,19 @@ func isBuiltin(info *types.Info, fun ast.Expr, names ...string) bool {
 	return ok && slices.Contains(names, b.Name())
 }
 
-func findEnclosingFunction(start, end token.Pos, file *ast.File) (*ast.FuncDecl, *ast.DeferStmt, *analysisError) {
-	path, _ := astutil.PathEnclosingInterval(file, start, end)
-
-	// Find the function declaration that encloses the positions.
-	var outer *ast.FuncDecl
+// enclosingFunction returns the FuncDecl that contains cur and the outermost DeferStmt between them, if any. Deferred
+// access to a protected field is validated differently.
+func enclosingFunction(cur inspector.Cursor) (inspector.Cursor, *ast.DeferStmt, bool) {
 	var deferStmt *ast.DeferStmt
-	for _, p := range path {
-		// Deferred access to a protected field is validated differently.
-		if d, ok := p.(*ast.DeferStmt); ok {
-			deferStmt = d
-		}
-
-		if p, ok := p.(*ast.FuncDecl); ok {
-			outer = p
-			break
+	for c := range cur.Enclosing((*ast.FuncDecl)(nil), (*ast.DeferStmt)(nil)) {
+		switch n := c.Node().(type) {
+		case *ast.DeferStmt:
+			deferStmt = n
+		case *ast.FuncDecl:
+			return c, deferStmt, true
 		}
 	}
-
-	if outer == nil {
-		return nil, nil, &analysisError{
-			msg: "no enclosing function",
-			pos: start,
-		}
-	}
-
-	return outer, deferStmt, nil
+	return inspector.Cursor{}, nil, false
 }
 
 func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysisError {
@@ -293,10 +265,9 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 		for _, u := range p.usages {
 			found := false
 			var lockExpr *ast.SelectorExpr
-			ast.Inspect(u.enclosingFunc, func(curr ast.Node) bool {
-				if curr == nil {
-					return false
-				}
+			body := u.enclosingFunc.Node().(*ast.FuncDecl).Body
+			u.enclosingFunc.Inspect([]ast.Node{(*ast.DeferStmt)(nil), (*ast.CallExpr)(nil)}, func(c inspector.Cursor) bool {
+				curr := c.Node()
 
 				// Access to a protected field can be deferred. Skip node if this is a defer statement
 				// that is not the same where the field is accessed.
@@ -304,11 +275,7 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 					return deferStmt == u.deferStmt
 				}
 
-				cexpr, ok := curr.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				fnSelector, ok := cexpr.Fun.(*ast.SelectorExpr)
+				fnSelector, ok := curr.(*ast.CallExpr).Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
 				}
@@ -323,7 +290,7 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 				}
 
 				// Return if the function call is outside the function or after the protected field access.
-				if curr.Pos() <= u.enclosingFunc.Body.Pos() || curr.Pos() >= u.selectorXID.Pos() {
+				if curr.Pos() <= body.Pos() || curr.Pos() >= u.selectorXID.Pos() {
 					return false
 				}
 
@@ -331,7 +298,7 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 					return true
 				}
 
-				// ast.Inspect continues with the siblings, so the last Lock() before the access wins and
+				// Inspect continues with the siblings, so the last Lock() before the access wins and
 				// Lock(); Unlock(); Lock() counts as locked.
 				found = true
 				lockExpr = fnSelector
@@ -356,16 +323,9 @@ func checkLocksUsed(pass *analysis.Pass, m map[string]*protectedData) []*analysi
 
 func isUnlockCalled(pass *analysis.Pass, u *usage, lockExpr *ast.SelectorExpr, lockName string) bool {
 	unlocked := false
-	ast.Inspect(u.enclosingFunc, func(curr ast.Node) bool {
-		if curr == nil {
-			return false
-		}
-
-		cexpr, ok := curr.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		fnSelector, ok := cexpr.Fun.(*ast.SelectorExpr)
+	u.enclosingFunc.Inspect([]ast.Node{(*ast.CallExpr)(nil)}, func(c inspector.Cursor) bool {
+		curr := c.Node()
+		fnSelector, ok := curr.(*ast.CallExpr).Fun.(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
@@ -386,7 +346,7 @@ func isUnlockCalled(pass *analysis.Pass, u *usage, lockExpr *ast.SelectorExpr, l
 
 		// An Unlock() in another deferred statement does not run before the access, so it neither
 		// unlocks nor cancels an earlier Unlock().
-		_, deferStmt, _ := findEnclosingFunction(curr.Pos(), curr.End(), u.file)
+		_, deferStmt, _ := enclosingFunction(c)
 		if deferStmt == u.deferStmt {
 			unlocked = true
 		}
@@ -418,23 +378,20 @@ func isLockFieldOf(pass *analysis.Pass, fnSelector *ast.SelectorExpr, lockName s
 	return pass.TypesInfo.ObjectOf(sxid) == pass.TypesInfo.ObjectOf(accessor)
 }
 
-func getEnclosingStruct(f *ast.File, posStart, posEnd token.Pos) *ast.TypeSpec {
+// getEnclosingStruct returns the innermost named struct type declaration that contains the range, e.g. a comment.
+func getEnclosingStruct(root inspector.Cursor, posStart, posEnd token.Pos) *ast.TypeSpec {
+	cur, ok := root.FindByPos(posStart, posEnd)
+	if !ok {
+		return nil
+	}
 	// Need TypeSpec here to get the struct name.
-	var spec *ast.TypeSpec
-	path, _ := astutil.PathEnclosingInterval(f, posStart, posEnd)
-	for _, p := range path {
-		if typeSpec, ok := p.(*ast.TypeSpec); ok {
-			if typeSpec.Name == nil {
-				continue
-			}
-			if _, ok := typeSpec.Type.(*ast.StructType); ok {
-				spec = typeSpec
-				break
-			}
+	for c := range cur.Enclosing((*ast.TypeSpec)(nil)) {
+		typeSpec := c.Node().(*ast.TypeSpec)
+		if _, ok := typeSpec.Type.(*ast.StructType); ok && typeSpec.Name != nil {
+			return typeSpec
 		}
 	}
-
-	return spec
+	return nil
 }
 
 func getLock(pass *analysis.Pass, spec *ast.TypeSpec, c *ast.Comment) (*ast.Field, string, *analysisError) {
