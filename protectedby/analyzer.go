@@ -84,6 +84,12 @@ func parseComments(pass *analysis.Pass, root inspector.Cursor) (map[string]*prot
 	var errors []*analysisError
 
 	for _, f := range pass.Files {
+		// Building the comment map dominates parseComments, and most files have no directive.
+		if !slices.ContainsFunc(f.Comments, func(cg *ast.CommentGroup) bool {
+			return slices.ContainsFunc(cg.List, hasDirective)
+		}) {
+			continue
+		}
 		commentMap := ast.NewCommentMap(pass.Fset, f, f.Comments)
 
 		for node, commentMapGroups := range commentMap {
@@ -102,7 +108,7 @@ func parseComments(pass *analysis.Pass, root inspector.Cursor) (map[string]*prot
 		commentGroup:
 			for _, cg := range commentMapGroups {
 				for _, comment := range cg.List {
-					if !strings.Contains(strings.ToLower(comment.Text), protectedBy) {
+					if !hasDirective(comment) {
 						continue
 					}
 
@@ -147,6 +153,11 @@ func parseComments(pass *analysis.Pass, root inspector.Cursor) (map[string]*prot
 	}
 
 	return res, errors
+}
+
+// hasDirective reports whether the comment contains "protected by ", matched case-insensitively.
+func hasDirective(c *ast.Comment) bool {
+	return strings.Contains(strings.ToLower(c.Text), protectedBy)
 }
 
 func implementsLocker(pass *analysis.Pass, f *ast.Field) bool {
