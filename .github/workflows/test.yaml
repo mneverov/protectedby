@@ -31,3 +31,21 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/protectedby" .
           "$RUNNER_TEMP/protectedby" ./...
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base revision must be available for the comparison.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Compares BenchmarkRun with the PR base, or with the previous main commit on push. The table is also added
+      # to the job summary. Benchmarks on shared runners are noisy; only large changes are meaningful.
+      - name: Compare benchmarks
+        run: make bench-compare BASE=${{ github.event.pull_request.base.sha || github.event.before }}
